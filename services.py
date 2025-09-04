@@ -22,7 +22,7 @@ from config import (
 from models import Message, GroupMessageHistoryResponse, Sender
 
 
-async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 60.0, client: Optional[httpx.AsyncClient] = None):
+async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 0, client: Optional[httpx.AsyncClient] = None):
     """
     通用的HTTP请求重试工具函数
     
@@ -249,7 +249,7 @@ class ChatService:
             "reverseOrder": False,
         }
         try:
-            response = await retry_http_request(GET_GROUP_MSG_HISTORY_URL, payload, max_retry_count=2, timeout=60.0, client=self.client)
+            response = await retry_http_request(GET_GROUP_MSG_HISTORY_URL, payload, max_retry_count=2, client=self.client)
             return GroupMessageHistoryResponse.model_validate(response.json())
         except httpx.HTTPStatusError as e:
             print(f"Error getting group message history: {e.response.status_code}")
