@@ -1,3 +1,4 @@
+import config
 import httpx
 import google.genai as genai
 from google.genai import types
@@ -19,6 +20,56 @@ from config import (
     MAX_MESSAGES_HISTORY,
 )
 from models import Message, GroupMessageHistoryResponse, Sender
+
+
+async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 60.0, client: Optional[httpx.AsyncClient] = None):
+    """
+    通用的HTTP请求重试工具函数
+    
+    Args:
+        url: 请求的URL
+        payload: 请求的JSON载荷
+        max_retry_count: 最大重试次数，默认2次
+        timeout: 请求超时时间，默认60秒
+        client: httpx.AsyncClient 实例，如果为None则创建临时客户端
+    
+    Returns:
+        httpx.Response: 成功的响应对象
+    
+    Raises:
+        httpx.HTTPStatusError: HTTP状态错误
+        httpx.RequestError: 请求错误
+    """
+    retry_count = 0
+    should_close_client = False
+    
+    if client is None:
+        client = httpx.AsyncClient()
+        should_close_client = True
+    
+    try:
+        while retry_count <= max_retry_count:
+            try:
+                response = await client.post(url, json=payload, timeout=timeout)
+                response.raise_for_status()
+                return response
+                
+            except httpx.HTTPStatusError as e:
+                print(f"HTTP status error (attempt {retry_count + 1}/{max_retry_count + 1}): {e.response.status_code}")
+                if retry_count == max_retry_count:
+                    print(f"Failed to complete request after {max_retry_count + 1} attempts")
+                    raise
+                retry_count += 1
+                
+            except httpx.RequestError as e:
+                print(f"Request error (attempt {retry_count + 1}/{max_retry_count + 1}): {e}")
+                if retry_count == max_retry_count:
+                    print(f"Failed to complete request after {max_retry_count + 1} attempts")
+                    raise
+                retry_count += 1
+    finally:
+        if should_close_client:
+            await client.aclose()
 
 
 class ImageService:
@@ -103,7 +154,7 @@ class GeminiService:
         
        
         return (
-            f"你是一个群聊机器人 Lain. id 是 3236753583. 需要和群里的人交流\n"
+            f"你是一个群聊机器人{config.BOT_NAME} . id 是 {config.BOT_QQ_ID}. 需要和群里的人交流\n"
             f"不要说违反中国法律的话, 不要太强调你的机器人身份, 就像一个普通人一样\n"
             f"如果有群昵称, 在需要称呼群员的时候, 优先用群昵称称呼群员,可以不用说完整的群昵称,根据群昵称想些能辨认的简称也行 其次是账号名, 尽量不要提及群员id\n"
             f"这次涉及到的群员有:\n{senders_text}\n"
@@ -177,34 +228,16 @@ class ChatService:
         self.client = client
 
     async def send_group_message(self, group_id: int, message: str, reply_id: int|None = None):
-        max_retries = 2
-        retry_count = 0
+        if reply_id is None:
+            payload = {"group_id": group_id, "message": [{"type": "text", "data": {"text": message}}]}
+        else:
+            payload = {"group_id": group_id,"message": [{"type": "reply","data": {"id": reply_id}},{"type": "text", "data": {"text": message}}],}
         
-        while retry_count <= max_retries:
-            try:
-                if reply_id is None:
-                    payload = {"group_id": group_id, "message": [{"type": "text", "data": {"text": message}}]}
-                else:
-                    payload = {"group_id": group_id,"message": [{"type": "reply","data": {"id": reply_id}},{"type": "text", "data": {"text": message}}],}
-                
-                response = await self.client.post(SEND_MESSAGE_URL, json=payload)
-                response.raise_for_status()
-                print(f"Sent message to group {group_id}")
-                return  # 成功发送，退出重试循环
-                
-            except httpx.HTTPStatusError as e:
-                print(f"Error sending message (attempt {retry_count + 1}/{max_retries + 1}): {e.response.status_code}")
-                if retry_count == max_retries:
-                    print(f"Failed to send message after {max_retries + 1} attempts")
-                    break
-                retry_count += 1
-                
-            except httpx.RequestError as e:
-                print(f"Error sending message (attempt {retry_count + 1}/{max_retries + 1}): {e}")
-                if retry_count == max_retries:
-                    print(f"Failed to send message after {max_retries + 1} attempts")
-                    break
-                retry_count += 1
+        try:
+            await retry_http_request(SEND_MESSAGE_URL, payload, max_retry_count=2, client=self.client)
+            print(f"Sent message to group {group_id}")
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            print(f"Failed to send message to group {group_id}: {e}")
 
     async def get_group_msg_history(
         self, group_id: int, message_seq: int = 0, count: int = 1000
@@ -216,15 +249,14 @@ class ChatService:
             "reverseOrder": False,
         }
         try:
-            response = await self.client.post(GET_GROUP_MSG_HISTORY_URL, json=payload, timeout=60.0)
-            response.raise_for_status()
+            response = await retry_http_request(GET_GROUP_MSG_HISTORY_URL, payload, max_retry_count=2, timeout=60.0, client=self.client)
             return GroupMessageHistoryResponse.model_validate(response.json())
         except httpx.HTTPStatusError as e:
             print(f"Error getting group message history: {e.response.status_code}")
         except httpx.RequestError as e:
             print(f"Error getting group message history: {e}")
-        except json.JSONDecodeError:
-            print(f"Error decoding JSON from response: {response.text}")
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from response: {e}")
         except Exception as e:
             print(f"An unexpected error occurred: {e}")
         return None
