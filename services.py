@@ -22,7 +22,7 @@ from config import (
 from models import Message, GroupMessageHistoryResponse, Sender
 
 
-async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 0, client: Optional[httpx.AsyncClient] = None):
+async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 10, client: Optional[httpx.AsyncClient] = None,method: str = "POST"):
     """
     通用的HTTP请求重试工具函数
     
@@ -50,7 +50,8 @@ async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, 
     try:
         while retry_count <= max_retry_count:
             try:
-                response = await client.post(url, json=payload, timeout=timeout)
+                # response = await client.post(url, json=payload, timeout=timeout)
+                response = await client.request(method, url, json=payload, timeout=timeout)
                 response.raise_for_status()
                 return response
                 
@@ -122,6 +123,7 @@ class GeminiService:
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         #self.model_name = "gemma-3-27b-it"
         self.model_name = "gemini-2.5-pro"
+        self.small_model_name = "gemma-3-27b-it"
         self.max_messages_history = MAX_MESSAGES_HISTORY
 
 
@@ -206,13 +208,23 @@ class GeminiService:
                 if ENABLE_VISION:
                     for msg in recent_messages:
                         imgs.extend(msg.get_images())
+                        
+                grounding_tool = types.Tool(
+                    google_search=types.GoogleSearch()
+                )
 
                 # response = await model.generate_content(content_parts)
                 response = self.client.models.generate_content(
-                model=self.model_name,
-                    contents=content_parts
+                    model=self.model_name,
+                    contents=content_parts,
+                    config=types.GenerateContentConfig(
+                        tools=[grounding_tool]
+                        )
                 )
-                return response.text
+                text_response = response.text
+                
+
+                return text_response
             except Exception as e:
                 if ("503" in str(e) or "overloaded" in str(e).lower()) and attempt < max_retries:
                     print(e)
@@ -227,7 +239,7 @@ class ChatService:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
 
-    async def send_group_message(self, group_id: int, message: str, reply_id: int|None = None):
+    async def send_group_message(self, group_id: int, message: str, reply_id: Optional[int] = None):
         if reply_id is None:
             payload = {"group_id": group_id, "message": [{"type": "text", "data": {"text": message}}]}
         else:
@@ -235,9 +247,9 @@ class ChatService:
         
         try:
             await retry_http_request(SEND_MESSAGE_URL, payload, max_retry_count=2, client=self.client)
-            print(f"Sent message to group {group_id}")
+            print(f"Sent message to group {group_id}: {message}")
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            print(f"Failed to send message to group {group_id}: {e}")
+            print(f"Failed to send message to group {group_id}: {message}. error: {e}")
 
     async def get_group_msg_history(
         self, group_id: int, message_seq: int = 0, count: int = 1000
@@ -249,7 +261,7 @@ class ChatService:
             "reverseOrder": False,
         }
         try:
-            response = await retry_http_request(GET_GROUP_MSG_HISTORY_URL, payload, max_retry_count=2, client=self.client)
+            response = await retry_http_request(GET_GROUP_MSG_HISTORY_URL, payload, max_retry_count=2, client=self.client, method="POST")
             return GroupMessageHistoryResponse.model_validate(response.json())
         except httpx.HTTPStatusError as e:
             print(f"Error getting group message history: {e.response.status_code}")
@@ -290,3 +302,25 @@ class EventService:
             await self.session.close()
 
 
+def add_citations(response: types.GenerateContentResponse):
+    text = response.text
+    supports = response.candidates[0].grounding_metadata.grounding_supports
+    chunks = response.candidates[0].grounding_metadata.grounding_chunks
+
+    # Sort supports by end_index in descending order to avoid shifting issues when inserting.
+    sorted_supports = sorted(supports, key=lambda s: s.segment.end_index, reverse=True)
+
+    for support in sorted_supports:
+        end_index = support.segment.end_index
+        if support.grounding_chunk_indices:
+            # Create citation string like [1](link1)[2](link2)
+            citation_links = []
+            for i in support.grounding_chunk_indices:
+                if i < len(chunks):
+                    uri = chunks[i].web.uri
+                    citation_links.append(f"[{i + 1}]({uri})")
+
+            citation_string = ", ".join(citation_links)
+            text = text[:end_index] + "\n[参考]"+ citation_string + text[end_index:]
+
+    return text
