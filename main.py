@@ -148,6 +148,7 @@ class ChatBot:
                 group_state["has_history"] = True
 
         history = self.message_queues[group_id]
+        print(history)
         response_text = self.gemini_service.generate_content(history)
         self.message_queues[group_id].append(
             Message(

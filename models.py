@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from config import ENABLE_VISION
 
@@ -212,6 +212,32 @@ class HistoryMessageData(BaseModel):
     """
 
     messages: List[GroupHistoryMessageEvent]
+    
+    @field_validator('messages', mode='before')
+    @classmethod
+    def validate_messages(cls, v):
+        """
+        Custom validator to filter out invalid messages and keep valid ones.
+        """
+        if not isinstance(v, list):
+            return v
+            
+        valid_messages = []
+        invalid_count = 0
+        
+        for i, message_data in enumerate(v):
+            try:
+                # Try to validate individual message
+                validated_message = GroupHistoryMessageEvent.model_validate(message_data)
+                valid_messages.append(validated_message)
+            except Exception as e:
+                invalid_count += 1
+                print(f"Skipping invalid message at index {i}: {e}")
+                
+        if invalid_count > 0:
+            print(f"Filtered out {invalid_count} invalid messages, kept {len(valid_messages)} valid messages")
+            
+        return valid_messages
 
 
 class GroupMessageHistoryResponse(BaseModel):
