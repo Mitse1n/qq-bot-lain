@@ -118,13 +118,13 @@ class ChatBot:
         self.active_group_tasks.add(group_id)
         try:
             async with self.semaphore:
-                await self.handle_chat_request(group_id, event.message_id)
+                await self.handle_chat_request(group_id, event.message_id,event.user_id)
         except Exception as e:
             print(f"Error handling event for group {group_id}: {e}")
         finally:
             self.active_group_tasks.remove(group_id)
 
-    async def handle_chat_request(self, group_id: int, reply_id: int):
+    async def handle_chat_request(self, group_id: int, reply_id: int, mention_id:int):
         group_state = self.group_states[group_id]
         message_queue = self.message_queues[group_id]
         if len(message_queue) < 50 and not group_state["has_history"]:
@@ -157,7 +157,7 @@ class ChatBot:
                 content=[TextMessageSegment(type="text", data=TextData(text=response_text))],
             )
         )
-        await self.chat_service.send_group_message(group_id, response_text, reply_id)
+        await self.chat_service.send_group_message(group_id, response_text, reply_id,mention_id)
 
     async def close(self):
         await self.http_client.aclose()

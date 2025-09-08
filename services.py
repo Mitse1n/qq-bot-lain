@@ -165,7 +165,7 @@ class GeminiService:
             f"{'图片格式是 [n], 只要被 [] 包裹就是图片, n 是一个数字, 表示是第几张图片,' if ENABLE_VISION else ''}\n"
             f"下面是最近的聊天记录\n\n"
             f"{pre_msgs_text}\n\n"
-            f"最近聊天记录只是参考, 主要是回复给你发送的消息, 你的回答不支持表情, 不能用 @ 符号来 mention 群员, 也不支持图片\n"
+            f"最近聊天记录只是参考, 主要是回复给你发送的消息, 你的这次回答不支持表情, 不支持图片, 也不能用 @ 符号来 mention 群员,\n"
             f"给你发送的消息是\n\n{latest_msg_text}\n"
         )
 
@@ -239,11 +239,14 @@ class ChatService:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
 
-    async def send_group_message(self, group_id: int, message: str, reply_id: Optional[int] = None):
+    async def send_group_message(self, group_id: int, message: str, reply_id: Optional[int] = None,mention_id: Optional[int] = None):
         if reply_id is None:
             payload = {"group_id": group_id, "message": [{"type": "text", "data": {"text": message}}]}
         else:
-            payload = {"group_id": group_id,"message": [{"type": "reply","data": {"id": reply_id}},{"type": "text", "data": {"text": message}}],}
+            payload = {"group_id": group_id,"message": [
+                {"type": "reply","data": {"id": reply_id}},
+                {"type": "at","data": {"qq": mention_id,}},
+                {"type": "text", "data": {"text": message}}]}
         
         try:
             await retry_http_request(SEND_MESSAGE_URL, payload, max_retry_count=2, client=self.client)
