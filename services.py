@@ -226,9 +226,15 @@ class GeminiService:
 
                 return text_response
             except Exception as e:
-                if ("503" in str(e) or "overloaded" in str(e).lower()) and attempt < max_retries:
+                if "503" in str(e) or "overloaded" in str(e).lower():
                     print(e)
-                    print(f"Model is overloaded. Retrying ... (Attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries:
+                        print(
+                            f"Model is overloaded. Retrying ... (Attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(1)
+                    else:
+                        return "服务器过热, 等几秒重试吧"
                 else:
                     print(f"Error generating content with Gemini: {e}")
                     return "Sorry, I had a problem generating a response."
