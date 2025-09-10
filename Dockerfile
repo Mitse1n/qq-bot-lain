@@ -18,4 +18,4 @@ RUN pip install .
 COPY . .
 
 # Run main.py when the container launches
-CMD ["python3", "main.py"]
+CMD ["python3", "qqbot/main.py"]
