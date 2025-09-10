@@ -227,15 +227,10 @@ class GeminiService:
                 return text_response
             except Exception as e:
                 print(f"Error generating content with Gemini: {e}")
-                if "503" in str(e) or "overloaded" in str(e).lower():
-                    print(f"Retrying ... (Attempt {attempt }/{max_retries})")
-                    if attempt == max_retries:
-                        return " 模型过热, 稍后再试"
-                elif "429" in str(e) :
-                    return " 今天 API 限额了, 下午一点后重试吧"
+                if "503" in str(e)  and attempt <= max_retries:
+                    print(f"Retrying ... (Attempt {attempt}/{max_retries})")
                 else:
-                    print(f"Error generating content with Gemini: {e}")
-                    return "Sorry, I had a problem generating a response."
+                    raise e
 
 class ChatService:
     def __init__(self, client: httpx.AsyncClient):
