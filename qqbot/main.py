@@ -6,7 +6,6 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import List, Deque
 import pprint
-import yaml
 
 from qqbot.config_loader import settings
 from qqbot.models import (
@@ -106,6 +105,7 @@ class ChatBot:
         
         if not self._should_process_message(message):
             return
+        print( f"Received message in group {event.group_id} from user {event.user_id}, content: {message.content}" )
 
         self.message_queues[event.group_id].append(message)
 
@@ -150,7 +150,6 @@ class ChatBot:
                 group_state["has_history"] = True
 
         history  :Deque[Message] = self.message_queues[group_id]
-        print( f"Received message in group {group_id} from user {reply_id}, content: {history[-1].content}" )
 
         try:
             response_text = self.gemini_service.generate_content(history)
