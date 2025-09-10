@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from config import ENABLE_VISION
+from qqbot.config_loader import settings
 
 
 class Sender(BaseModel):
@@ -153,7 +153,7 @@ class Message:
         Returns a list of image filenames from the message content.
         These should be the locally saved file names.
         """
-        if not ENABLE_VISION:
+        if not settings.get("enable_vision"):
             return []
         images = []
         for segment in self.content:

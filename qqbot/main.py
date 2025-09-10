@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import List
 
-import config   
+from qqbot.config_loader import settings
 from models import (
     GroupMessageEvent,
     AtMessageSegment,
@@ -26,7 +26,7 @@ class ChatBot:
         self.event_service = EventService()
         self.gemini_service = GeminiService()
         self.chat_service = ChatService(self.http_client)
-        self.message_queues = defaultdict(lambda: deque(maxlen=config.MAX_MESSAGES_HISTORY))
+        self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
         self.active_group_tasks = set()  # Per-group concurrency control
@@ -48,15 +48,15 @@ class ChatBot:
 
     def _is_bot_mentioned(self, message_segments: list) -> bool:
         return any(
-            isinstance(msg, AtMessageSegment) and msg.data.qq == config.BOT_QQ_ID
+            isinstance(msg, AtMessageSegment) and msg.data.qq == settings.get('bot_qq_id')
             for msg in message_segments
         )
 
     def _is_message_from_bot(self, message: Message) -> bool:
-        return message.user_id == str(config.BOT_QQ_ID)
+        return message.user_id == str(settings.get('bot_qq_id'))
 
     def _should_process_message(self, message: Message) -> bool:
-        text, _ = message.get_formatted_text(vision_enabled=config.ENABLE_VISION)
+        text, _ = message.get_formatted_text(vision_enabled=settings.get('enable_vision'))
         return text.strip() != ""
 
     async def _process_message(self, msg_data: dict) -> Message:
@@ -73,7 +73,7 @@ class ChatBot:
             for segment in message_content_raw:
                 if segment.get("type") == "image":
                     image_count += 1
-                    if config.ENABLE_VISION:
+                    if settings.get('enable_vision'):
                         image_url = segment.get("data", {}).get("url")
                         if image_url:
                             # Create a unique filename for each image
@@ -142,7 +142,7 @@ class ChatBot:
                     if self._should_process_message(processed_msg):
                         history_messages.append(processed_msg)
 
-                new_queue = deque(maxlen=config.MAX_MESSAGES_HISTORY)
+                new_queue = deque(maxlen=settings.get('max_messages_history'))
                 new_queue.extend(history_messages)
                 self.message_queues[group_id] = new_queue
                 group_state["has_history"] = True
@@ -160,8 +160,8 @@ class ChatBot:
         self.message_queues[group_id].append(
             Message(
                 timestamp=datetime.now(),
-                user_id=config.BOT_QQ_ID,
-                nickname=config.BOT_NAME,
+                user_id=settings.get('bot_qq_id'),
+                nickname=settings.get('bot_name'),
                 content=[TextMessageSegment(type="text", data=TextData(text=response_text))],
             )
         )

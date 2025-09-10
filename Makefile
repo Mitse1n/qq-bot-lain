@@ -13,12 +13,20 @@ deploy:
 	@echo "版本: $(VERSION)"
 	@echo "1. 构建新镜像..."
 	docker build -t $(LATEST_TAG) -t $(VERSION_TAG) .
-	@echo "2. 停止并删除旧容器..."
+	@echo "2. 检查并准备配置文件..."
+	@if [ ! -f config.yaml ]; then \
+		echo "本地未找到 config.yaml，从镜像中复制默认配置..."; \
+		docker run --rm -v $(PWD):/host $(LATEST_TAG) cp /app/config.yaml /host/config.yaml; \
+		echo "已创建默认配置文件 config.yaml，请根据需要修改配置"; \
+	else \
+		echo "使用现有的 config.yaml 配置文件"; \
+	fi
+	@echo "3. 停止并删除旧容器..."
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	@echo "3. 运行新容器..."
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" $(LATEST_TAG)
-	@echo "4. 清理旧镜像（保留最近3个版本）..."
+	@echo "4. 运行新容器..."
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD)/config.yaml:/app/config.yaml $(LATEST_TAG)
+	@echo "5. 清理旧镜像（保留最近3个版本）..."
 	@docker images $(IMAGE_NAME) --format "{{.Tag}}" | grep -v latest | tail -n +4 | xargs -I {} docker rmi $(IMAGE_NAME):{} 2>/dev/null || true
 	@echo "清理完成，保留最近3个版本"
 	@echo "部署完成！"
@@ -59,9 +67,17 @@ rollback-to:
 		exit 1; \
 	fi
 	@echo "回滚到版本: $(VERSION)"
+	@echo "检查并准备配置文件..."
+	@if [ ! -f config.yaml ]; then \
+		echo "本地未找到 config.yaml，从镜像中复制默认配置..."; \
+		docker run --rm -v $(PWD):/host $(IMAGE_NAME):$(VERSION) cp /app/config.yaml /host/config.yaml; \
+		echo "已创建默认配置文件 config.yaml，请根据需要修改配置"; \
+	else \
+		echo "使用现有的 config.yaml 配置文件"; \
+	fi
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" $(IMAGE_NAME):$(VERSION)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD)/config.yaml:/app/config.yaml $(IMAGE_NAME):$(VERSION)
 	@echo "回滚完成！"
 
 # 清理旧版本镜像（保留最近3个版本）
