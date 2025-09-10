@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import List
 
 from qqbot.config_loader import settings
-from models import (
+from qqbot.models import (
     GroupMessageEvent,
     AtMessageSegment,
     TextMessageSegment,
@@ -15,7 +15,7 @@ from models import (
     TextData,
     MessageSegment,
 )
-from services import EventService, GeminiService, ChatService, ImageService
+from qqbot.services import EventService, GeminiService, ChatService, ImageService
 
 
 class ChatBot:

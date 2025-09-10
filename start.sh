@@ -9,5 +9,6 @@ elif [ ! -f /app/config.yaml ]; then
     exit 1
 fi
 
-# 启动应用
+# 将当前目录添加到 Python 路径，然后启动应用
+export PYTHONPATH="/app:$PYTHONPATH"
 exec python3 qqbot/main.py
