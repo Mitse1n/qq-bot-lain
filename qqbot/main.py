@@ -4,7 +4,9 @@ import aiohttp
 from pydantic import ValidationError, TypeAdapter
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import List
+from typing import List, Deque
+import pprint
+import yaml
 
 from qqbot.config_loader import settings
 from qqbot.models import (
@@ -147,7 +149,9 @@ class ChatBot:
                 self.message_queues[group_id] = new_queue
                 group_state["has_history"] = True
 
-        history = self.message_queues[group_id]
+        history  :Deque[Message] = self.message_queues[group_id]
+        print( f"Received message in group {group_id} from user {reply_id}, content: {history[-1].content}" )
+
         try:
             response_text = self.gemini_service.generate_content(history)
         except Exception as e:
@@ -182,5 +186,7 @@ async def main():
 
 if __name__ == "__main__":
     print("Lain Bot is staring...")
+    print("当前 config.yaml 配置如下：")
+    pprint.pprint(settings.as_dict())
+    print("-" * 50)
     asyncio.run(main())
-
