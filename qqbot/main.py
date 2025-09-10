@@ -105,12 +105,10 @@ class ChatBot:
         
         if not self._should_process_message(message):
             return
-        print("-------------------")
         self.message_queues[event.group_id].append(message)
 
         if not self._is_bot_mentioned(event.message):
             return
-
         group_id = event.group_id
         if group_id in self.active_group_tasks:
             print(f"Task for group {group_id} already in progress. Ignoring.")
@@ -129,7 +127,6 @@ class ChatBot:
     async def handle_chat_request(self, group_id: int, reply_id: int, mention_id:int):
         group_state = self.group_states[group_id]
         message_queue = self.message_queues[group_id]
-        print("000000000000")
         if len(message_queue) < 50 and not group_state["has_history"]:
             history_response = await self.chat_service.get_group_msg_history(
                 group_id, count=1000
@@ -149,11 +146,9 @@ class ChatBot:
                 new_queue.extend(history_messages)
                 self.message_queues[group_id] = new_queue
                 group_state["has_history"] = True
-        print("111111111111")
         history  :Deque[Message] = self.message_queues[group_id]
 
         try:
-            print("22222222")
             response_text = self.gemini_service.generate_content(history)
         except Exception as e:
             if "503" in str(e):

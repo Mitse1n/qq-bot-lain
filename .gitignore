@@ -297,6 +297,7 @@ public
 # Project specific
 data/
 config.py
+config.yaml
 *.db
 *.sqlite
 *.sqlite3
