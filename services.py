@@ -238,7 +238,12 @@ class GeminiService:
                 else:
                     print(f"Error generating content with Gemini: {e}")
                     return "Sorry, I had a problem generating a response."
-        return "Sorry, I had a problem generating a response after multiple retries."
+                if "429" in str(e) :
+                    return " 今天 API 限额了, 下午一点后重试吧"
+                else:
+                    print(f"Error generating content with Gemini: {e}")
+                    return " Sorry, I had a problem generating a response."
+        return " Sorry, I had a problem generating a response after multiple retries."
 
 
 class ChatService:
