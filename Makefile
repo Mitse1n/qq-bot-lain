@@ -25,7 +25,7 @@ deploy:
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
 	@echo "4. 运行新容器..."
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD)/config.yaml:/app/config.yaml $(LATEST_TAG)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD):/app/host $(LATEST_TAG)
 	@echo "5. 清理旧镜像（保留最近3个版本）..."
 	@docker images $(IMAGE_NAME) --format "{{.Tag}}" | grep -v latest | tail -n +4 | xargs -I {} docker rmi $(IMAGE_NAME):{} 2>/dev/null || true
 	@echo "清理完成，保留最近3个版本"
@@ -77,7 +77,7 @@ rollback-to:
 	fi
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD)/config.yaml:/app/config.yaml $(IMAGE_NAME):$(VERSION)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(PWD):/app/host $(IMAGE_NAME):$(VERSION)
 	@echo "回滚完成！"
 
 # 清理旧版本镜像（保留最近3个版本）

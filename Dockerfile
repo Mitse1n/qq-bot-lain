@@ -17,5 +17,9 @@ RUN pip install .
 # Copy the rest of the application's source code from the current directory to the working directory in the container
 COPY . .
 
-# Run main.py when the container launches
-CMD ["python3", "qqbot/main.py"]
+# Copy and set executable permissions for the start script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Run start.sh when the container launches
+CMD ["/app/start.sh"]
