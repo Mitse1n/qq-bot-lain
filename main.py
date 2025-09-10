@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import List
 
-import qqbot.config as config
+import config   
 from models import (
     GroupMessageEvent,
     AtMessageSegment,

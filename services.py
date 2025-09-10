@@ -227,7 +227,7 @@ class GeminiService:
                 return text_response
             except Exception as e:
                 print(f"Error generating content with Gemini: {e}")
-                if "503" in str(e)  and attempt <= max_retries:
+                if "503" in str(e) and attempt < max_retries:
                     print(f"Retrying ... (Attempt {attempt}/{max_retries})")
                 else:
                     raise e
