@@ -204,8 +204,13 @@ class ChatBot:
                 )
 
         except Exception as e:
+            if "503" in str(e):
+                error_message = " 哎呀，我的思绪暂时有点混乱,拜托稍后再试试吧？"
+            elif "429" in str(e):
+                error_message = " 哎呀，我被问得太多了，明天试试吧？"
+            else:
+                error_message = " 哎呀，出现奇怪的错误了"
             print(f"Error generating content: {e}")
-            error_message = " 哎呀，我的思绪有点混乱，你可以再说一遍吗？"
             await self.chat_service.send_group_message(group_id, error_message, reply_id, mention_id)
             self.message_queues[group_id].append(
                 Message(
@@ -215,24 +220,6 @@ class ChatBot:
                     content=[TextMessageSegment(type="text", data=TextData(text=error_message))],
                 ))
             print(f"Error handling request: {e}")
-        # try:
-        #     response_text = self.gemini_service.generate_content(history)
-        # except Exception as e:
-        #     if "503" in str(e):
-        #         response_text = " server overloaded, try again later"
-        #     elif "429" in str(e):
-        #         response_text = " over quota, try again after 1pm"
-        #     else:
-        #         response_text = " Sorry, I had a problem generating a response."
-        # self.message_queues[group_id].append(
-        #     Message(
-        #         timestamp=datetime.now(),
-        #         user_id=settings.get('bot_qq_id'),
-        #         nickname=settings.get('bot_name'),
-        #         content=[TextMessageSegment(type="text", data=TextData(text=response_text))],
-        #     )
-        # )
-        # await self.chat_service.send_group_message(group_id, response_text, reply_id,mention_id)
 
     async def close(self):
         await self.http_client.aclose()
