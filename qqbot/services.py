@@ -215,7 +215,7 @@ class GeminiService:
                         tools=[grounding_tool]
                         )
                 )
-                text_response = " " + (response.text or "")
+                text_response = " " + response.text
                 
 
                 return text_response
@@ -330,34 +330,33 @@ class ChatService:
 
 class EventService:
     def __init__(self):
-        timeout = aiohttp.ClientTimeout(total=None)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        pass
 
     async def listen(self):
+        timeout = aiohttp.ClientTimeout(total=None)
         try:
-            async with self.session.get(
-                settings.get('event_stream_url'), headers={"Accept": "text/event-stream"}
-            ) as resp:
-                while True:
-                    line = await resp.content.readline()
-                    if not line:
-                        break
-                    line = line.decode("utf-8").strip()
-                    if line.startswith("data:"):
-                        event_data = json.loads(line[5:])
-                        if (
-                            event_data.get("message_type") == "group"
-                            and event_data.get("post_type") == "message"
-                        ):
-                            yield event_data
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    settings.get('event_stream_url'), headers={"Accept": "text/event-stream"}
+                ) as resp:
+                    while True:
+                        line = await resp.content.readline()
+                        if not line:
+                            break
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data:"):
+                            event_data = json.loads(line[5:])
+                            if (
+                                event_data.get("message_type") == "group"
+                                and event_data.get("post_type") == "message"
+                            ):
+                                yield event_data
         except aiohttp.ClientError as e:
             print(f"Error connecting to event stream: {e}")
-        finally:
-            await self.session.close()
 
 
 def add_citations(response: types.GenerateContentResponse):
-    text = response.text or ""
+    text = response.text
     supports = response.candidates[0].grounding_metadata.grounding_supports
     chunks = response.candidates[0].grounding_metadata.grounding_chunks
 

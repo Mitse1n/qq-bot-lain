@@ -159,7 +159,7 @@ class ChatBot:
                         if part:  # 确保不发送空消息
                             if first_chunk:
                                 await self.chat_service.send_group_message(
-                                    group_id, part, reply_id, mention_id
+                                    group_id, " " +part, reply_id, mention_id
                                 )
                                 first_chunk = False
                             else:
