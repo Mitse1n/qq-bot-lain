@@ -13,6 +13,7 @@ from qqbot.config_loader import (
     settings,
 )
 from qqbot.models import Message, GroupMessageHistoryResponse, Sender
+import asyncio
 
 
 async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 10, client: Optional[httpx.AsyncClient] = None,method: str = "POST"):
@@ -54,6 +55,7 @@ async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, 
                     print(f"Failed to complete request after {max_retry_count + 1} attempts")
                     raise
                 retry_count += 1
+                await asyncio.sleep(1)  # 等待1秒后重试
                 
             except httpx.RequestError as e:
                 print(f"Request error (attempt {retry_count + 1}/{max_retry_count + 1}): {e}")
@@ -61,8 +63,10 @@ async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, 
                     print(f"Failed to complete request after {max_retry_count + 1} attempts")
                     raise
                 retry_count += 1
+                await asyncio.sleep(1)  # 等待1秒后重试
+            
     finally:
-        if should_close_client:
+        if should_close_client and client:
             await client.aclose()
 
 

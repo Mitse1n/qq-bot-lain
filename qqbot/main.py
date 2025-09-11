@@ -4,8 +4,7 @@ import aiohttp
 from pydantic import ValidationError, TypeAdapter
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import List, Deque
-import pprint
+from typing import List
 
 from qqbot.config_loader import settings
 from qqbot.models import (
@@ -105,15 +104,16 @@ class ChatBot:
         
         if not self._should_process_message(message):
             return
+
         self.message_queues[event.group_id].append(message)
 
         if not self._is_bot_mentioned(event.message):
             return
+
         group_id = event.group_id
         if group_id in self.active_group_tasks:
             print(f"Task for group {group_id} already in progress. Ignoring.")
             return
-        print( f"Received message in group {event.group_id} from user {event.user_id}, content: {message.content}" )
 
         self.active_group_tasks.add(group_id)
         try:
@@ -146,8 +146,8 @@ class ChatBot:
                 new_queue.extend(history_messages)
                 self.message_queues[group_id] = new_queue
                 group_state["has_history"] = True
-        history  :Deque[Message] = self.message_queues[group_id]
 
+        history = self.message_queues[group_id]
         try:
             response_text = self.gemini_service.generate_content(history)
         except Exception as e:
@@ -182,7 +182,5 @@ async def main():
 
 if __name__ == "__main__":
     print("Lain Bot is staring...")
-    print("当前 config.yaml 配置如下：")
-    pprint.pprint(settings.as_dict())
-    print("-" * 50)
     asyncio.run(main())
+
