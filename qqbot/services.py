@@ -1,3 +1,4 @@
+from pyexpat import model
 import httpx
 import google.genai as genai
 from google.genai import types
@@ -7,6 +8,7 @@ from typing import List, Deque, Optional
 import os
 import random
 import string
+import time
 from io import BytesIO
 from PIL import Image
 from qqbot.config_loader import (
@@ -170,7 +172,7 @@ class GeminiService:
     def generate_content(
         self, messages: Deque[Message]
     ) -> str:
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries + 1):
             try:
                 if not messages:
@@ -200,11 +202,6 @@ class GeminiService:
                                         )
                                 except Exception as e:
                                     print(f"Could not open image {image_path}: {e}")
-
-                imgs = []
-                if settings.get('enable_vision'):
-                    for msg in recent_messages:
-                        imgs.extend(msg.get_images())
                         
                 grounding_tool = types.Tool(
                     google_search=types.GoogleSearch()
@@ -218,14 +215,67 @@ class GeminiService:
                         tools=[grounding_tool]
                         )
                 )
-                text_response = " " + response.text
+                text_response = " " + (response.text or "")
                 
 
                 return text_response
             except Exception as e:
                 print(f"Error generating content with Gemini: {e}")
                 if "503" in str(e) and attempt < max_retries:
-                    print(f"Retrying ... (Attempt {attempt}/{max_retries})")
+                    print(f"Retrying ... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(2)
+                else:
+                    raise e
+    async def generate_content_stream(self, messages: Deque[Message]):
+        if not messages:
+            raise Exception("No messages to process.")
+        recent_messages = list(messages)[-self.max_messages_history:]
+        prompt = self._build_chat_prompt(recent_messages)
+        content_parts = [prompt]
+        if settings.get('enable_vision'):
+            imgs = []
+            for msg in recent_messages:
+                imgs.extend(msg.get_images())
+
+            if imgs:
+                image_dir = "../data/img"
+                for filename in imgs:
+                    image_path = os.path.join(image_dir, filename)
+                    if os.path.exists(image_path):  
+                        try:
+                            with open(image_path, "rb") as f:
+                                image_bytes = f.read()
+                                content_parts.append(
+                                    types.Part.from_bytes(data=image_bytes,mime_type='image/jpeg'),
+                                )
+                        except Exception as e:
+                            print(f"Could not open image {image_path}: {e}")
+
+        grounding_tool = types.Tool(
+            google_search=types.GoogleSearch()
+        )
+
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries + 1):
+            try:
+                stream = self.client.aio.models.generate_content_stream(
+                    model=self.model_name, 
+                    contents=content_parts,                    
+                    config=types.GenerateContentConfig(tools=[grounding_tool])
+                )
+                async for chunk in await stream:
+                    yield chunk
+                return
+            except Exception as e:
+                if "503" in str(e):
+                    if attempt < max_retries:
+                        print(f"Model is overloaded (503). Retrying in {retry_delay}s... (Attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        print(f"Model is overloaded (503). Max retries reached.")
+                        raise e
                 else:
                     raise e
 
@@ -247,7 +297,14 @@ class ChatService:
             print(f"Sent message to group {group_id}: {message}")
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             print(f"Failed to send message to group {group_id}: {message}. error: {e}")
-
+            
+    async def send_group_poke(self, group_id: int, user_id: int):
+        payload = {"group_id": group_id, "user_id": user_id}
+        try:
+            await retry_http_request(settings.get('send_poke_url'), payload, max_retry_count=2, client=self.client)
+            print(f"send poke to group {group_id}: {user_id}")
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            print(f"Failed to send poke to group {group_id}: {user_id}. error: {e}")
     async def get_group_msg_history(
         self, group_id: int, message_seq: int = 0, count: int = 1000
     ) -> Optional[GroupMessageHistoryResponse]:
@@ -300,7 +357,7 @@ class EventService:
 
 
 def add_citations(response: types.GenerateContentResponse):
-    text = response.text
+    text = response.text or ""
     supports = response.candidates[0].grounding_metadata.grounding_supports
     chunks = response.candidates[0].grounding_metadata.grounding_chunks
 
