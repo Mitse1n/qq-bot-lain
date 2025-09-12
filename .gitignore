@@ -313,3 +313,4 @@ config.yaml
 *.bak
 *.backup
 *.old
+config.yaml
