@@ -1,8 +1,0 @@
-bot_name: Lain
-bot_qq_id: hello
-enable_vision: false
-event_stream_url: hellllllo
-gemini_api_key: ''
-get_group_msg_history_url: ''
-max_messages_history: 800
-send_message_url: ''
