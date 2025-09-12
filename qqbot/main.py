@@ -24,7 +24,7 @@ class ChatBot:
         self.aiohttp_session = aiohttp.ClientSession()
         self.image_service = ImageService(self.aiohttp_session)
         self.event_service = EventService()
-        self.gemini_service = GeminiService()
+        self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
         self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
@@ -64,25 +64,9 @@ class ChatBot:
         sender = msg_data.get("sender", {})
         user_id = sender.get("user_id")
         timestamp = msg_data.get("time")
-        group_id = msg_data.get("group_id")
-        real_seq = msg_data.get("real_seq")
 
-        image_count = 0
-        message_content_raw = msg_data.get("message", [])
-        if "message" in msg_data and isinstance(message_content_raw, list):
-            for segment in message_content_raw:
-                if segment.get("type") == "image":
-                    image_count += 1
-                    if settings.get('enable_vision'):
-                        image_url = segment.get("data", {}).get("url")
-                        if image_url:
-                            # Create a unique filename for each image
-                            image_name = (
-                                f"{group_id}-{real_seq}-{user_id}-{timestamp}-{image_count}.jpeg"
-                            )
-                            await self.image_service.download_image(image_url, image_name)
-                            # Update the segment to store the local filename
-                            segment["data"]["file"] = image_name
+        # Process images using ImageService
+        message_content_raw = await self.image_service.process_message_images(msg_data)
 
         parsed_content = TypeAdapter(List[MessageSegment]).validate_python(
             message_content_raw
@@ -222,6 +206,7 @@ class ChatBot:
             print(f"Error handling request: {e}")
 
     async def close(self):
+        await self.image_service.stop_cleanup_task()
         await self.http_client.aclose()
         await self.aiohttp_session.close()
 
