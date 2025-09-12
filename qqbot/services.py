@@ -119,11 +119,28 @@ class ImageService:
 
 class GeminiService:
     def __init__(self):
-        self.client = genai.Client(api_key=settings.get('gemini_api_key'))
+        # Handle both single API key and list of API keys
+        api_keys = settings.get('gemini_api_key')
+        if isinstance(api_keys, list):
+            self.api_keys = api_keys
+        else:
+            self.api_keys = [api_keys]
+        
+        self.current_key_index = random.randint(0, len(self.api_keys) - 1)
+        self.client = genai.Client(api_key=self.api_keys[self.current_key_index])
         #self.model_name = "gemma-3-27b-it"
         self.model_name = "gemini-2.5-pro"
         self.small_model_name = "gemma-3-27b-it"
         self.max_messages_history = settings.get('max_messages_history')
+
+    def _rotate_api_key(self):
+        """Rotate to the next API key in the list"""
+        time.sleep(random.uniform(1, 2))
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        new_api_key = self.api_keys[self.current_key_index]
+        self.client = genai.Client(api_key=new_api_key)
+        print(f"Rotated to API key index {self.current_key_index}")
+        return new_api_key
 
 
     def _build_chat_prompt(self, messages: List[Message]) -> str:
@@ -161,7 +178,7 @@ class GeminiService:
             f"这次涉及到的群员有:\n{senders_text}\n"
             f"聊天记录格式是 (发送时间)群员id: 内容\n"
             f"时间格式是 %m-%d %H:%M\n"
-            f"{'图片格式是 [n], 只要被 [] 包裹就是图片, n 是一个数字, 表示是第几张图片,' if settings.get('enable_vision') else ''}\n"
+            f"{'图片格式是 [n], 只要被 [] 包裹就是图片, n 是一个数字, 表示是第几张图片,' if settings.get('enable_vision') else '你收不到文本之外的消息'}\n"
             f"下面是最近的聊天记录\n\n"
             f"{pre_msgs_text}\n\n"
             f"最近聊天记录只是参考, 主要是回复给你发送的消息, 你的这次回答不支持表情, 不支持图片, 也不能用 @ 符号来 mention 群员.\n"
@@ -173,6 +190,9 @@ class GeminiService:
         self, messages: Deque[Message]
     ) -> str:
         max_retries = 3
+        keys_tried = 0
+        max_key_rotations = len(self.api_keys)
+        
         for attempt in range(max_retries + 1):
             try:
                 if not messages:
@@ -221,6 +241,14 @@ class GeminiService:
                 return text_response
             except Exception as e:
                 print(f"Error generating content with Gemini: {e}")
+                
+                # Handle 429 (rate limit) errors with key rotation
+                if "429" in str(e) and keys_tried < max_key_rotations:
+                    print(f"Rate limit exceeded (429). Rotating API key...")
+                    self._rotate_api_key()
+                    keys_tried += 1
+                    continue
+                
                 if "503" in str(e) and attempt < max_retries:
                     print(f"Retrying ... (Attempt {attempt + 1}/{max_retries})")
                     time.sleep(2)
@@ -257,6 +285,8 @@ class GeminiService:
 
         max_retries = 3
         retry_delay = 2
+        keys_tried = 0
+        max_key_rotations = len(self.api_keys)
 
         for attempt in range(max_retries + 1):
             try:
@@ -269,6 +299,13 @@ class GeminiService:
                     yield chunk
                 return
             except Exception as e:
+                # Handle 429 (rate limit) errors with key rotation
+                if "429" in str(e) and keys_tried < max_key_rotations:
+                    print(f"Rate limit exceeded (429). Rotating API key...")
+                    self._rotate_api_key()
+                    keys_tried += 1
+                    continue
+                
                 if "503" in str(e):
                     if attempt < max_retries:
                         print(f"Model is overloaded (503). Retrying in {retry_delay}s... (Attempt {attempt + 1}/{max_retries})")
