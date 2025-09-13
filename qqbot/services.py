@@ -256,8 +256,8 @@ class GeminiService:
         print(f"Rotated to API key index {self.current_key_index}")
         return new_api_key
 
-    def _get_formatted_text_with_image_limit(self, message: Message, image_count_start: int, 
-                                           all_images: List[str], selected_images: List[str], 
+    def _get_formatted_text_with_image_limit(self, message: Message,
+                                            selected_images: List[str], 
                                            vision_enabled: bool) -> str:
         """
         格式化消息内容，但只为选中的图片分配索引号
@@ -317,15 +317,15 @@ class GeminiService:
         # 处理历史消息，需要重新计算图片索引
         for msg in other_msgs[:settings.get('img_context_length')]:
             formatted_text = self._get_formatted_text_with_image_limit(
-                msg, selected_images, selected_images, False
+                msg,  selected_images, False
             )
             pre_msg_lines.append(
                 f"({msg.timestamp.strftime('%m-%d %H:%M')}) {msg.user_id}: {formatted_text}"
             )
         
         for msg in other_msgs[settings.get('img_context_length'):]:
-            formatted_text, total_image_count = self._get_formatted_text_with_image_limit(
-                msg, total_image_count, selected_images, selected_images, settings.get('enable_vision')
+            formatted_text = self._get_formatted_text_with_image_limit(
+                msg,  selected_images, settings.get('enable_vision')
             )
             pre_msg_lines.append(
                 f"({msg.timestamp.strftime('%m-%d %H:%M')}) {msg.user_id}: {formatted_text}"
@@ -334,7 +334,7 @@ class GeminiService:
         pre_msgs_text = "\n".join(pre_msg_lines)
 
         latest_msg_text = self._get_formatted_text_with_image_limit(
-            latest_msg, total_image_count, selected_images,
+            latest_msg,  selected_images,
             vision_enabled=settings.get('enable_vision')
         )
         latest_msg_text = f"({latest_msg.timestamp.strftime('%m-%d %H:%M')}) {latest_msg.user_id}: {latest_msg_text}"
