@@ -345,7 +345,7 @@ class GeminiService:
             pre_msg_lines.append(
                 f"({msg.timestamp.strftime('%m-%d %H:%M')}) {msg.user_id}: {formatted_text}"
             )
-        
+        print(pre_msg_lines[-10:])
         pre_msgs_text = "\n".join(pre_msg_lines)
 
         latest_msg_text, _ = self._get_formatted_text_with_image_limit(
