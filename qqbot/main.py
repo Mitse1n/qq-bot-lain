@@ -136,34 +136,35 @@ class ChatBot:
         first_chunk = True
         try:
             async for chunk in self.gemini_service.generate_content_stream(history):
-                response_sentence += chunk.text
-                parts = response_sentence.split("\n\n")
-                if len(parts) > 1:
-                    for part in parts[:-1]:
-                        if part:  # 确保不发送空消息
-                            if first_chunk:
-                                await self.chat_service.send_group_message(
-                                    group_id, " " +part, reply_id, mention_id
+                if chunk.text is not None:
+                    response_sentence += chunk.text
+                    parts = response_sentence.split("\n\n")
+                    if len(parts) > 1:
+                        for part in parts[:-1]:
+                            if part:  # 确保不发送空消息
+                                if first_chunk:
+                                    await self.chat_service.send_group_message(
+                                        group_id, " " +part, reply_id, mention_id
+                                    )
+                                    first_chunk = False
+                                else:
+                                    await self.chat_service.send_group_message(
+                                        group_id, part
+                                    )
+                                self.message_queues[group_id].append(
+                                    Message(
+                                        timestamp=datetime.now(),
+                                        user_id=settings.get("bot_qq_id"),
+                                        nickname=settings.get("bot_name"),
+                                        content=[
+                                            TextMessageSegment(
+                                                type="text",
+                                                data=TextData(text=part),
+                                            )
+                                        ],
+                                    )
                                 )
-                                first_chunk = False
-                            else:
-                                await self.chat_service.send_group_message(
-                                    group_id, part
-                                )
-                            self.message_queues[group_id].append(
-                                Message(
-                                    timestamp=datetime.now(),
-                                    user_id=settings.get("bot_qq_id"),
-                                    nickname=settings.get("bot_name"),
-                                    content=[
-                                        TextMessageSegment(
-                                            type="text",
-                                            data=TextData(text=part),
-                                        )
-                                    ],
-                                )
-                            )
-                    response_sentence = parts[-1]
+                        response_sentence = parts[-1]
 
             if response_sentence:  # 发送剩余的消息
                 if first_chunk:
