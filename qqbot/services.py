@@ -125,8 +125,8 @@ class ImageService:
                 images.sort(key=lambda x: x['real_seq'], reverse=True)
                 
                 # 删除超过5张的旧图片
-                if len(images) > settings.get('max_images_cnt'):
-                    images_to_delete = images[settings.get('max_images_cnt'):]  
+                if len(images) > settings.get('max_imgs_cnt'):
+                    images_to_delete = images[settings.get('max_imgs_cnt'):]  
                     
                     for image_info in images_to_delete:
                         try:
@@ -289,7 +289,7 @@ class GeminiService:
         for msg in messages:
             all_images.extend(msg.get_images())
         
-        max_images = settings.get('max_images_cnt')
+        max_images = settings.get('max_imgs_cnt')
         selected_images = all_images[-max_images:] if len(all_images) > max_images else all_images
         
         # 只包含img_context_length之后的消息中的图片
@@ -315,7 +315,7 @@ class GeminiService:
         for msg in messages:
             all_images.extend(msg.get_images())
         
-        max_images = settings.get('max_images_cnt')
+        max_images = settings.get('max_imgs_cnt')
         selected_images = all_images[-max_images:] if len(all_images) > max_images else all_images
         
         # 创建一个映射，记录哪些图片应该被包含
@@ -354,6 +354,9 @@ class GeminiService:
         )
         latest_msg_text = f"({latest_msg.timestamp.strftime('%m-%d %H:%M')}) {latest_msg.user_id}: {latest_msg_text}"
         senders: dict[str, Sender] = {}
+        print("---------------")
+        print(pre_msg_lines[-5:])
+        print(latest_msg_text)
         for msg in messages:
             if msg.user_id not in senders:
                 senders[msg.user_id] = Sender(user_id=msg.user_id, nickname=msg.nickname, card=msg.card)
