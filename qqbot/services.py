@@ -204,7 +204,7 @@ class ImageService:
                 response.raise_for_status()
                 image_data = await response.read()
 
-                if len(image_data) > 1 * 1024 * 8:
+                if len(image_data) > 1 * 1024 * settings.get("max_img_size"):
                     img = Image.open(BytesIO(image_data))
 
                     if img.mode != 'RGB':
