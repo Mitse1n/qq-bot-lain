@@ -271,7 +271,7 @@ class GeminiService:
                 elif segment.type == "image":
                     if vision_enabled and segment.data.file in selected_images:
                         image_index = selected_images.index(segment.data.file) + 1
-                        text_parts.append(f"[{image_index}]")
+                        text_parts.append(f"img[{image_index}]")
                     # 如果图片不在选中列表中，就跳过不显示
                 elif segment.type == "at":
                     text_parts.append(f"@{segment.data.qq}")
@@ -359,7 +359,7 @@ class GeminiService:
             f"这次涉及到的群员有:\n{senders_text}\n"
             f"聊天记录格式是 (发送时间)群员id: 内容\n"
             f"时间格式是 %m-%d %H:%M\n"
-            f"{'你只能看到最近的图片, 图片格式是 [n], 只要被 [] 包裹就是图片, n 是一个数字, 对应发给你的第 n 张图片,' if settings.get('enable_vision') else '你收不到图片'}\n"
+            f"{'你只能看到最近的图片, 图片格式是 img[n], n 是一个数字, 对应发给你的第 n 张图片,' if settings.get('enable_vision') else '你收不到图片'}\n"
             f"下面是最近的聊天记录\n\n"
             f"{pre_msgs_text}\n\n"
             f"最近聊天记录只是参考, 主要是回复给你发送的消息, 你的这次回答不支持表情, 不支持图片, 也不能用 @ 符号来 mention 群员.\n"
