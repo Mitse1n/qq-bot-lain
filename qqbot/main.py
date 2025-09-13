@@ -43,8 +43,8 @@ class ChatBot:
                 print(f"Error validating event data: {e}")
                 print(event_data)
 
-    def _extract_text(self, message: Message) -> str:
-        return message.get_formatted_text()
+    # def _extract_text(self, message: Message) -> str:
+    #     return message.get_formatted_text(vision_enabled=settings.get('enable_vision'))
 
     def _is_bot_mentioned(self, message_segments: list) -> bool:
         return any(

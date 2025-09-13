@@ -129,7 +129,7 @@ class Message:
     card: str = ""
     content: List[MessageSegment] = field(default_factory=list)
 
-    def get_formatted_text(self, image_count_start: int = 0, vision_enabled: bool = True) -> tuple[str, int]:
+    def get_formatted_text(self,vision_enabled: bool, image_count_start: int = 0) -> tuple[str, int]:
         """
         Formats the message content into a string representation.
         e.g., "[1] a picture [2] another picture @user"

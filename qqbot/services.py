@@ -258,12 +258,11 @@ class GeminiService:
 
     def _get_formatted_text_with_image_limit(self, message: Message, image_count_start: int, 
                                            all_images: List[str], selected_images: List[str], 
-                                           vision_enabled: bool = True) -> tuple[str, int]:
+                                           vision_enabled: bool) -> str:
         """
         格式化消息内容，但只为选中的图片分配索引号
         """
         text_parts = []
-        image_count = image_count_start
         
         for segment in message.content:
             if hasattr(segment, 'type'):
@@ -271,57 +270,43 @@ class GeminiService:
                     text_parts.append(segment.data.text)
                 elif segment.type == "image":
                     if vision_enabled and segment.data.file in selected_images:
-                        image_count += 1
-                        text_parts.append(f"[{image_count}]")
+                        image_index = selected_images.index(segment.data.file) + 1
+                        text_parts.append(f"[{image_index}]")
                     # 如果图片不在选中列表中，就跳过不显示
                 elif segment.type == "at":
                     text_parts.append(f"@{segment.data.qq}")
         
-        return "".join(text_parts), image_count
+        return "".join(text_parts)
 
     def _get_images_for_ai(self, messages: List[Message]) -> List[str]:
 
         if not settings.get('enable_vision'):
             return []
             
-        # 收集所有图片
-        all_images = []
-        for msg in messages:
-            all_images.extend(msg.get_images())
-        
-        max_images = settings.get('max_imgs_cnt')
-        selected_images = all_images[-max_images:] if len(all_images) > max_images else all_images
-        
-        # 只包含img_context_length之后的消息中的图片
+        # 收集最近img_context_length条消息中的图片
         img_context_length = settings.get('img_context_length')
-        if len(messages) > img_context_length:
-            images_to_include = []
-            for msg in messages[img_context_length:]:
-                for img in msg.get_images():
-                    if img in selected_images:
-                        images_to_include.append(img)
-            return images_to_include
-        else:
-            # 如果历史消息总数不超过img_context_length，则不包含任何图片
-            return []
+        selected_images = []
+        for msg in messages[-img_context_length:]:
+            selected_images.extend(msg.get_images())
+        
+        # 限制图片数量
+        max_images = settings.get('max_imgs_cnt')
+        selected_images = selected_images[-max_images:] if len(selected_images) > max_images else selected_images
+        
+        return selected_images
 
 
     def _build_chat_prompt(self, messages: List[Message]) -> str:
         latest_msg = messages[-1]
         other_msgs = messages[:-1]
         
-        # 首先收集所有图片，然后只保留最后5张
-        all_images = []
-        for msg in messages:
-            all_images.extend(msg.get_images())
-        
-        max_images = settings.get('max_imgs_cnt')
-        selected_images = all_images[-max_images:] if len(all_images) > max_images else all_images
+        # 使用统一的图片选择逻辑
+        selected_images = self._get_images_for_ai(messages)
         
         # 创建一个映射，记录哪些图片应该被包含
         image_index_map = {}
         current_image_index = 0
-        for i, img in enumerate(all_images):
+        for i, img in enumerate(selected_images):
             if img in selected_images:
                 current_image_index += 1
                 image_index_map[i] = current_image_index
@@ -331,8 +316,8 @@ class GeminiService:
         
         # 处理历史消息，需要重新计算图片索引
         for msg in other_msgs[:settings.get('img_context_length')]:
-            formatted_text, total_image_count = self._get_formatted_text_with_image_limit(
-                msg, total_image_count, all_images, selected_images, False
+            formatted_text = self._get_formatted_text_with_image_limit(
+                msg, selected_images, selected_images, False
             )
             pre_msg_lines.append(
                 f"({msg.timestamp.strftime('%m-%d %H:%M')}) {msg.user_id}: {formatted_text}"
@@ -340,7 +325,7 @@ class GeminiService:
         
         for msg in other_msgs[settings.get('img_context_length'):]:
             formatted_text, total_image_count = self._get_formatted_text_with_image_limit(
-                msg, total_image_count, all_images, selected_images, settings.get('enable_vision')
+                msg, total_image_count, selected_images, selected_images, settings.get('enable_vision')
             )
             pre_msg_lines.append(
                 f"({msg.timestamp.strftime('%m-%d %H:%M')}) {msg.user_id}: {formatted_text}"
@@ -348,8 +333,8 @@ class GeminiService:
         print(pre_msg_lines[-10:])
         pre_msgs_text = "\n".join(pre_msg_lines)
 
-        latest_msg_text, _ = self._get_formatted_text_with_image_limit(
-            latest_msg, total_image_count, all_images, selected_images, 
+        latest_msg_text = self._get_formatted_text_with_image_limit(
+            latest_msg, total_image_count, selected_images,
             vision_enabled=settings.get('enable_vision')
         )
         latest_msg_text = f"({latest_msg.timestamp.strftime('%m-%d %H:%M')}) {latest_msg.user_id}: {latest_msg_text}"
@@ -382,72 +367,72 @@ class GeminiService:
         )
 
 
-    def generate_content(
-        self, messages: Deque[Message]
-    ) -> str:
-        max_retries = 3
-        keys_tried = 0
-        max_key_rotations = len(self.api_keys)
+    # def generate_content(
+    #     self, messages: Deque[Message]
+    # ) -> str:
+    #     max_retries = 3
+    #     keys_tried = 0
+    #     max_key_rotations = len(self.api_keys)
         
-        for attempt in range(max_retries + 1):
-            try:
-                if not messages:
-                    return "I have no messages to process."
+    #     for attempt in range(max_retries + 1):
+    #         try:
+    #             if not messages:
+    #                 return "I have no messages to process."
 
-                recent_messages = list(messages)[-self.max_messages_history:]
-                prompt = self._build_chat_prompt(recent_messages)
-                content_parts = [prompt]
-                # 使用统一的图片选择逻辑
-                selected_imgs = self._get_images_for_ai(recent_messages)
+    #             recent_messages = list(messages)[-self.max_messages_history:]
+    #             prompt = self._build_chat_prompt(recent_messages)
+    #             content_parts = [prompt]
+    #             # 使用统一的图片选择逻辑
+    #             selected_imgs = self._get_images_for_ai(recent_messages)
                 
-                if selected_imgs:
-                    image_dir = self._get_image_dir()
-                    for filename in selected_imgs:
-                        image_path = os.path.join(image_dir, filename)
-                        if os.path.exists(image_path):
-                            try:
-                                with open(image_path, "rb") as f:
-                                    image_bytes = f.read()
-                                    content_parts.append(
-                                        types.Part.from_bytes(
-                                            data=image_bytes,
-                                            mime_type='image/jpeg',
-                                        ),
-                                    )
-                            except Exception as e:
-                                print(f"Could not open image {image_path}: {e}")
+    #             if selected_imgs:
+    #                 image_dir = self._get_image_dir()
+    #                 for filename in selected_imgs:
+    #                     image_path = os.path.join(image_dir, filename)
+    #                     if os.path.exists(image_path):
+    #                         try:
+    #                             with open(image_path, "rb") as f:
+    #                                 image_bytes = f.read()
+    #                                 content_parts.append(
+    #                                     types.Part.from_bytes(
+    #                                         data=image_bytes,
+    #                                         mime_type='image/jpeg',
+    #                                     ),
+    #                                 )
+    #                         except Exception as e:
+    #                             print(f"Could not open image {image_path}: {e}")
                         
-                grounding_tool = types.Tool(
-                    google_search=types.GoogleSearch()
-                )
+    #             grounding_tool = types.Tool(
+    #                 google_search=types.GoogleSearch()
+    #             )
 
-                # response = await model.generate_content(content_parts)
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=content_parts,
-                    config=types.GenerateContentConfig(
-                        tools=[grounding_tool]
-                        )
-                )
-                text_response = " " + response.text
+    #             # response = await model.generate_content(content_parts)
+    #             response = self.client.models.generate_content(
+    #                 model=self.model_name,
+    #                 contents=content_parts,
+    #                 config=types.GenerateContentConfig(
+    #                     tools=[grounding_tool]
+    #                     )
+    #             )
+    #             text_response = " " + response.text
                 
 
-                return text_response
-            except Exception as e:
-                print(f"Error generating content with Gemini: {e}")
+    #             return text_response
+    #         except Exception as e:
+    #             print(f"Error generating content with Gemini: {e}")
                 
-                # Handle 429 (rate limit) errors with key rotation
-                if "429" in str(e) and keys_tried < max_key_rotations:
-                    print(f"Rate limit exceeded (429). Rotating API key...")
-                    self._rotate_api_key()
-                    keys_tried += 1
-                    continue
+    #             # Handle 429 (rate limit) errors with key rotation
+    #             if "429" in str(e) and keys_tried < max_key_rotations:
+    #                 print(f"Rate limit exceeded (429). Rotating API key...")
+    #                 self._rotate_api_key()
+    #                 keys_tried += 1
+    #                 continue
                 
-                if "503" in str(e) and attempt < max_retries:
-                    print(f"Retrying ... (Attempt {attempt + 1}/{max_retries})")
-                    time.sleep(2)
-                else:
-                    raise e
+    #             if "503" in str(e) and attempt < max_retries:
+    #                 print(f"Retrying ... (Attempt {attempt + 1}/{max_retries})")
+    #                 time.sleep(2)
+    #             else:
+    #                 raise e
     async def generate_content_stream(self, messages: Deque[Message]):
         if not messages:
             raise Exception("No messages to process.")
