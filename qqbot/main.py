@@ -59,14 +59,15 @@ class ChatBot:
         text, _ = message.get_formatted_text(vision_enabled=settings.get('enable_vision'))
         return text.strip() != ""
 
-    async def _process_message(self, msg_data: dict) -> Message:
+    async def _process_message(self, msg_data: dict, enable_vision: bool) -> Message:
         """Processes a message, downloads images, and returns a Message object."""
         sender = msg_data.get("sender", {})
         user_id = sender.get("user_id")
         timestamp = msg_data.get("time")
 
         # Process images using ImageService
-        message_content_raw = await self.image_service.process_message_images(msg_data)
+        if enable_vision:
+            message_content_raw = await self.image_service.process_message_images(msg_data)
 
         parsed_content = TypeAdapter(List[MessageSegment]).validate_python(
             message_content_raw
@@ -84,7 +85,7 @@ class ChatBot:
         if event.post_type != "message" or event.message_type != "group":
             return
 
-        message = await self._process_message(event.model_dump())
+        message = await self._process_message(event.model_dump(), enable_vision=settings.get('enable_vision'))
         
         if not self._should_process_message(message):
             return
@@ -113,16 +114,22 @@ class ChatBot:
         message_queue = self.message_queues[group_id]
         if len(message_queue) < 50 and not group_state["has_history"]:
             history_response = await self.chat_service.get_group_msg_history(
-                group_id, count=1000
+                group_id, count=int(settings.get('max_messages_history') * 1.5)
             )
             if history_response and history_response.data:
                 history_messages = []
-                for msg in history_response.data.messages:
+                for msg in history_response.data.messages[:-settings.get('img_context_length')]:
                     if not (msg.sender and msg.message):
                         continue
 
-                    processed_msg = await self._process_message(msg.model_dump())
+                    processed_msg = await self._process_message(msg.model_dump(),False)
 
+                    if self._should_process_message(processed_msg):
+                        history_messages.append(processed_msg)
+                for msg in history_response.data.messages[-settings.get('img_context_length'):]:
+                    if not (msg.sender and msg.message):
+                        continue
+                    processed_msg = await self._process_message(msg.model_dump(),settings.get('enable_vision'))
                     if self._should_process_message(processed_msg):
                         history_messages.append(processed_msg)
 

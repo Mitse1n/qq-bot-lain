@@ -222,6 +222,9 @@ class ImageService:
         except aiohttp.ClientError as e:
             print(f"Error downloading image: {e}")
             return
+        except Exception as e:  # 捕获PIL等其他异常
+            print(f"Error processing image: {e}")
+            return
 
 
 class GeminiService:
@@ -283,17 +286,22 @@ class GeminiService:
         if not settings.get('enable_vision'):
             return []
             
-        # 收集最近img_context_length条消息中的图片
         img_context_length = settings.get('img_context_length')
         selected_images = []
         for msg in messages[-img_context_length:]:
             selected_images.extend(msg.get_images())
         
-        # 限制图片数量
+        image_dir = self._get_image_dir()
         max_images = settings.get('max_imgs_cnt')
-        selected_images = selected_images[-max_images:] if len(selected_images) > max_images else selected_images
         
-        return selected_images
+        def is_image_exists(filename):
+            image_path = os.path.join(image_dir, filename)
+            exists = os.path.exists(image_path)
+            if not exists:
+                print(f"Warning: Image file not found: {filename}")
+            return exists
+        
+        return list(filter(is_image_exists, selected_images))[-max_images:]
 
 
     def _build_chat_prompt(self, messages: List[Message]) -> str:
