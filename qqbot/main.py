@@ -66,8 +66,8 @@ class ChatBot:
         timestamp = msg_data.get("time")
 
         # Process images using ImageService
-        if enable_vision:
-            message_content_raw = await self.image_service.process_message_images(msg_data)
+        message_content_raw = await self.image_service.process_message_images(msg_data, enable_vision)
+
 
         parsed_content = TypeAdapter(List[MessageSegment]).validate_python(
             message_content_raw

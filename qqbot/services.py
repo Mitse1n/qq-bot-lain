@@ -157,7 +157,7 @@ class ImageService:
         """生成图片文件名"""
         return f"{group_id}-{real_seq}-{user_id}-{timestamp}-{image_count}.jpeg"
 
-    async def process_message_images(self, msg_data: dict) -> list:
+    async def process_message_images(self, msg_data: dict, enable_vision: bool) -> list:
         """处理消息中的所有图片，下载并更新文件名"""
         group_id = msg_data.get("group_id")
         real_seq = msg_data.get("real_seq")
@@ -169,19 +169,20 @@ class ImageService:
             return message_content_raw
         
         image_count = 0
-        for segment in message_content_raw:
-            if segment.get("type") == "image":
-                image_count += 1
-                if settings.get('enable_vision'):
-                    image_url = segment.get("data", {}).get("url")
-                    if image_url:
-                        # Generate unique filename
-                        image_name = self.generate_filename(
-                            group_id, real_seq, user_id, timestamp, image_count
-                        )
-                        await self.download_image(image_url, image_name)
-                        # Update the segment to store the local filename
-                        segment["data"]["file"] = image_name
+        if enable_vision:
+            for segment in message_content_raw:
+                if segment.get("type") == "image":
+                    image_count += 1
+                    if settings.get('enable_vision'):
+                        image_url = segment.get("data", {}).get("url")
+                        if image_url:
+                            # Generate unique filename
+                            image_name = self.generate_filename(
+                                group_id, real_seq, user_id, timestamp, image_count
+                            )
+                            await self.download_image(image_url, image_name)
+                            # Update the segment to store the local filename
+                            segment["data"]["file"] = image_name
         
         return message_content_raw
 
