@@ -271,7 +271,12 @@ class GeminiService:
         for segment in message.content:
             if hasattr(segment, 'type'):
                 if segment.type == "text":
-                    text_parts.append(segment.data.text)
+                    # 防注入处理，防止伪造他人发言或图片引用
+                    # 使用正则表达式替换所有换行符为一个空格，防止一条消息伪造成多条对话历史
+                    text = re.sub(r'[\r\n]+', ' ', segment.data.text)
+                    # 替换半角中括号为全角，防止用户自己输入[1]这样的格式伪造图片引用
+                    text = text.replace('[', '［').replace(']', '］')
+                    text_parts.append(text)
                 elif segment.type == "image":
                     if vision_enabled and segment.data.file in selected_images:
                         image_index = selected_images.index(segment.data.file) + 1
