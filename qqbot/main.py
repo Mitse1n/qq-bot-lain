@@ -5,6 +5,7 @@ from pydantic import ValidationError, TypeAdapter
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import List
+import uvicorn
 
 from qqbot.config_loader import settings
 from qqbot.models import (
@@ -16,6 +17,8 @@ from qqbot.models import (
     MessageSegment,
 )
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
+from qqbot.memory_service import GroupMemoryService
+from qqbot.api import api_server
 
 
 class ChatBot:
@@ -26,6 +29,7 @@ class ChatBot:
         self.event_service = EventService()
         self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
+        self.memory_service = GroupMemoryService(self.gemini_service, self.chat_service)
         self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
@@ -59,6 +63,35 @@ class ChatBot:
         text, _ = message.get_formatted_text(vision_enabled=settings.get('enable_vision'))
         return text.strip() != ""
 
+    def _binary_search_seq(self, messages: list, target_seq: str) -> int:
+        """
+        二分查找定位到第一个 real_seq 大于 target_seq 的消息的索引。
+        返回索引，如果所有消息的 real_seq 都小于等于 target_seq，则返回 len(messages)。
+        """
+        left, right = 0, len(messages)
+        
+        while left < right:
+            mid = (left + right) // 2
+            
+            # 获取当前消息的 real_seq，如果不存在则使用默认值
+            current_seq = messages[mid].real_seq if messages[mid].real_seq else "0"
+            
+            # 比较 real_seq（作为字符串比较，因为它们通常是数字字符串）
+            try:
+                # 尝试转换为整数进行比较
+                if int(current_seq) <= int(target_seq):
+                    left = mid + 1
+                else:
+                    right = mid
+            except (ValueError, TypeError):
+                # 如果转换失败，使用字符串比较
+                if current_seq <= target_seq:
+                    left = mid + 1
+                else:
+                    right = mid
+        
+        return left
+
     async def _process_message(self, msg_data: dict, enable_vision: bool) -> Message:
         """Processes a message, downloads images, and returns a Message object."""
         sender = msg_data.get("sender", {})
@@ -73,13 +106,7 @@ class ChatBot:
             message_content_raw
         )
 
-        return Message(
-            timestamp=datetime.fromtimestamp(timestamp),
-            user_id=str(user_id),
-            card=str(sender.get("card")),
-            nickname=sender.get("nickname"),
-            content=parsed_content,
-        )
+        return Message.from_group_event(msg_data, parsed_content)
 
     async def handle_event(self, event: GroupMessageEvent):
         if event.post_type != "message" or event.message_type != "group":
@@ -90,12 +117,38 @@ class ChatBot:
         if not self._should_process_message(message):
             return
 
-        self.message_queues[event.group_id].append(message)
+        group_id = event.group_id
+        message_queue = self.message_queues[group_id]
+
+        if not (self._is_bot_mentioned(event.message) or message_queue):
+            return
+        # Check if we're about to hit capacity and need to process quarter batch
+        if len(message_queue) == message_queue.maxlen:
+            # Calculate quarter size (1/4 of max capacity)
+            quarter_size = max(1, message_queue.maxlen // 4)
+            
+            # Extract the oldest quarter before adding new message
+            oldest_quarter = list(message_queue)[:quarter_size]
+            
+            # Remove the oldest quarter from deque to make room
+            # We need to reconstruct the deque with the remaining messages
+
+            remaining_messages = list(message_queue)[quarter_size:]
+            message_queue.clear()
+            message_queue.extend(remaining_messages)
+
+            # Now add the new message
+            message_queue.append(message)
+            # Process the quarter batch for memory update
+            if oldest_quarter:
+                print(f"Processing quarter batch of {len(oldest_quarter)}"
+                      f" messages for memory update in group {group_id}")
+                asyncio.create_task(self.memory_service.process_quarter_batch_for_memory(group_id, oldest_quarter))
+
 
         if not self._is_bot_mentioned(event.message):
             return
 
-        group_id = event.group_id
         if group_id in self.active_group_tasks:
             print(f"Task for group {group_id} already in progress. Ignoring.")
             return
@@ -114,35 +167,131 @@ class ChatBot:
         message_queue = self.message_queues[group_id]
         if len(message_queue) < 50 and not group_state["has_history"]:
             history_response = await self.chat_service.get_group_msg_history(
-                group_id, count=int(settings.get('max_messages_history') * 1.5)
+                group_id, count=int(settings.get('max_messages_history') * 4)
             )
             if history_response and history_response.data:
-                history_messages = []
-                for msg in history_response.data.messages[:-settings.get('img_context_length')]:
-                    if not (msg.sender and msg.message):
-                        continue
+                group_memory = self.memory_service.get_group_memory(group_id)
 
-                    processed_msg = await self._process_message(msg.model_dump(),False)
+                if group_memory:
+                    memory_last_seq = group_memory.last_seq
+                    
+                    # 二分查找定位到第一个 real_seq 大于 memory_last_seq 的消息
+                    messages = history_response.data.messages
+                    start_index = self._binary_search_seq(messages, memory_last_seq)
+                    
+                    # 获取从 start_index 开始的新消息
+                    new_messages = messages[start_index:]
+                    
+                    # 取最后的 max_messages_history 条消息放入 message_queue
+                    max_history = settings.get('max_messages_history')
+                    if len(new_messages) <= max_history:
+                        # 所有新消息都放入队列
+                        queue_messages = new_messages
+                        memory_update_messages = []
+                    else:
+                        # 取最后的 max_messages_history 条放入队列，前面的用于更新 memory
+                        memory_update_messages = new_messages[:-max_history]
+                        queue_messages = new_messages[-max_history:]
+                    
+                    # 处理放入队列的消息
+                    history_messages = []
+                    for msg in queue_messages:
+                        if not (msg.sender and msg.message):
+                            continue
+                        
+                        # 根据位置决定是否启用视觉功能
+                        msg_index = queue_messages.index(msg)
+                        is_recent = msg_index >= len(queue_messages) - settings.get('img_context_length')
+                        processed_msg = await self._process_message(msg.model_dump(), is_recent and settings.get('enable_vision'))
+                        
+                        if self._should_process_message(processed_msg):
+                            history_messages.append(processed_msg)
+                    
+                    # 更新消息队列
+                    new_queue = deque(maxlen=settings.get('max_messages_history'))
+                    new_queue.extend(history_messages)
+                    self.message_queues[group_id] = new_queue
+                    ##TODO: 考虑有没有必要加异步
+                    # 如果有需要更新到 memory 的消息，分批处理
+                    if memory_update_messages:
+                        print(f"Found {len(memory_update_messages)} messages to update memory for group {group_id}")
+                        # 将消息转换为 Message 对象
+                        converted_messages = []
+                        for msg in memory_update_messages:
+                            if msg.sender and msg.message:
+                                processed_msg = await self._process_message(msg.model_dump(), False)
+                                if self._should_process_message(processed_msg):
+                                    converted_messages.append(processed_msg)
 
-                    if self._should_process_message(processed_msg):
-                        history_messages.append(processed_msg)
-                for msg in history_response.data.messages[-settings.get('img_context_length'):]:
-                    if not (msg.sender and msg.message):
-                        continue
-                    processed_msg = await self._process_message(msg.model_dump(),settings.get('enable_vision'))
-                    if self._should_process_message(processed_msg):
-                        history_messages.append(processed_msg)
-
-                new_queue = deque(maxlen=settings.get('max_messages_history'))
-                new_queue.extend(history_messages)
-                self.message_queues[group_id] = new_queue
-                group_state["has_history"] = True
+                        batch_size = settings.get('max_messages_history')
+                        for i in range(0, len(converted_messages), batch_size):
+                            batch = converted_messages[i:i + batch_size]
+                            ##TODO: 考虑执行顺序
+                            asyncio.create_task(self.memory_service.process_quarter_batch_for_memory(group_id, batch))
+                    
+                    group_state["has_history"] = True
+                    return  # 提前返回，避免重复处理
+                else:
+                    # 当没有 group_memory 时，初始化 memory
+                    messages = history_response.data.messages
+                    max_history = settings.get('max_messages_history')
+                    
+                    if len(messages) <= max_history:
+                        # 消息数量不足，全部放入队列
+                        queue_messages = messages
+                        init_memory_messages = []
+                    else:
+                        # 取最后的 max_messages_history 条放入队列，前面的用于初始化 memory
+                        init_memory_messages = messages[:-max_history]
+                        queue_messages = messages[-max_history:]
+                    
+                    # 处理放入队列的消息
+                    history_messages = []
+                    for msg in queue_messages:
+                        if not (msg.sender and msg.message):
+                            continue
+                        
+                        # 根据位置决定是否启用视觉功能
+                        msg_index = queue_messages.index(msg)
+                        is_recent = msg_index >= len(queue_messages) - settings.get('img_context_length')
+                        processed_msg = await self._process_message(msg.model_dump(), is_recent and settings.get('enable_vision'))
+                        
+                        if self._should_process_message(processed_msg):
+                            history_messages.append(processed_msg)
+                    
+                    # 更新消息队列
+                    new_queue = deque(maxlen=settings.get('max_messages_history'))
+                    new_queue.extend(history_messages)
+                    self.message_queues[group_id] = new_queue
+                    
+                    # 如果有足够的消息用于初始化 memory，启动初始化任务
+                    if init_memory_messages and len(init_memory_messages) >= int(settings.get('max_messages_history')/2):
+                        print(f"Initializing memory with {len(init_memory_messages)} messages for group {group_id}")
+                        # 将消息转换为 Message 对象
+                        converted_messages = []
+                        for msg in init_memory_messages:
+                            if msg.sender and msg.message:
+                                processed_msg = await self._process_message(msg.model_dump(), False)
+                                if self._should_process_message(processed_msg):
+                                    converted_messages.append(processed_msg)
+                        
+                        # 启动初始化 memory 的任务
+                        asyncio.create_task(self.memory_service._generate_initial_memory_from_messages(group_id, converted_messages))
+                    group_state["has_history"] = True
+                    # return  # 提前返回，避免重复处理
 
         history = self.message_queues[group_id]
+        
+        group_memory = self.memory_service.get_group_memory(group_id)
+        if group_memory:
+            print(f"Using memory for group {group_id}: {group_memory[:50]}...")
+        else:
+            print(f"No memory for group {group_id}")
+
         response_sentence = ""
         first_chunk = True
         try:
-            async for chunk in self.gemini_service.generate_content_stream(history):
+            async for chunk in self.gemini_service.generate_content_stream(history, group_memory or ""):
                 if chunk.text is not None:
                     response_sentence += chunk.text
                     parts = response_sentence.split("\n\n")
@@ -219,15 +368,36 @@ class ChatBot:
         await self.aiohttp_session.close()
 
 
+async def run_api_server():
+    """Run the FastAPI server."""
+    config = uvicorn.Config(
+        api_server.app,
+        host="0.0.0.0",
+        port=settings.get('api_port', 8000),
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 async def main():
     bot = ChatBot()
+    
+    # Set the memory service in the API server
+    api_server.set_memory_service(bot.memory_service)
+    
     try:
-        await bot.run()
+        # Run both the bot and API server concurrently
+        await asyncio.gather(
+            bot.run(),
+            run_api_server()
+        )
     finally:
         await bot.close()
 
 
 if __name__ == "__main__":
-    print("Lain Bot is staring...")
+    print("Lain Bot is starting...")
+    print(f"API server will be available at http://0.0.0.0:{settings.get('api_port', 8000)}")
     asyncio.run(main())
 

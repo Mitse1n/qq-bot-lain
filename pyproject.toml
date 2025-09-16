@@ -19,6 +19,8 @@ dependencies = [
     "aiohttp",
     "Pillow",
     "dynaconf>=3.2.11",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]

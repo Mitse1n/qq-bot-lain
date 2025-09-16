@@ -127,7 +127,82 @@ class Message:
     user_id: str
     nickname: str
     card: str = ""
+    real_seq: Optional[str] = None
     content: List[MessageSegment] = field(default_factory=list)
+    
+    @classmethod
+    def from_group_event(cls, event, content: List[MessageSegment]) -> "Message":
+        """从群消息事件创建 Message 对象"""
+        return cls(
+            timestamp=datetime.fromtimestamp(event.get("time")),
+            user_id=str(event.get("user_id")),
+            card=str(event.get("sender", {}).get("card", "")),
+            nickname=event.get("sender", {}).get("nickname", ""),
+            content=content,
+            real_seq=event.get("real_seq"),
+        )
+    
+    @classmethod
+    def from_history_event(cls, msg: "GroupHistoryMessageEvent") -> Optional["Message"]:
+        """从历史消息事件创建 Message 对象"""
+        try:
+            return cls(
+                timestamp=datetime.fromtimestamp(msg.time),
+                user_id=str(msg.user_id),
+                nickname=msg.sender.nickname if msg.sender else "",
+                card=msg.sender.card if msg.sender else "",
+                content=msg.message or [],
+                real_seq=msg.real_seq if msg.real_seq else ""
+            )
+        except Exception as e:
+            print(f"Error converting message: {e}")
+            return None
+    
+    @classmethod
+    def create_text_message(cls, user_id: str, nickname: str, text: str, 
+                           card: str = "", timestamp: Optional[datetime] = None) -> "Message":
+        """创建文本消息"""
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        return cls(
+            timestamp=timestamp,
+            user_id=user_id,
+            nickname=nickname,
+            card=card,
+            content=[TextMessageSegment(type="text", data=TextData(text=text))]
+        )
+    
+    @classmethod
+    def create_system_message(cls, text: str, timestamp: Optional[datetime] = None) -> "Message":
+        """创建系统消息"""
+        if timestamp is None:
+            timestamp = datetime.now()
+            
+        return cls(
+            timestamp=timestamp,
+            user_id="system",
+            nickname="system",
+            content=[TextMessageSegment(type="text", data=TextData(text=text))]
+        )
+    
+    @classmethod
+    def from_api_data(cls, msg_data: dict) -> "Message":
+        """从 API 数据创建 Message 对象"""
+        return cls(
+            timestamp=datetime.fromtimestamp(
+                msg_data.get('timestamp', datetime.now().timestamp())
+            ),
+            user_id=str(msg_data.get('user_id', 'unknown')),
+            nickname=msg_data.get('nickname', ''),
+            card=msg_data.get('card', ''),
+            content=[
+                TextMessageSegment(
+                    type="text",
+                    data=TextData(text=msg_data.get('content', ''))
+                )
+            ]
+        )
 
     def get_formatted_text(self,vision_enabled: bool, image_count_start: int = 0) -> tuple[str, int]:
         """
