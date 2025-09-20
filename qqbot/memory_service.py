@@ -43,7 +43,7 @@ class GroupMemoryService:
         self.group_memory_initialized: Dict[int, bool] = {}
         # Cache for group memories
         self.group_memories: Dict[int, Memory] = {}
-        self.memory_operation_locks: set()
+        self.memory_operation_locks = set()
         # This is now handled by ChatBot's message_queues - no longer needed here
         
     def _get_memory_file_path(self, group_id: int, first_seq: str, last_seq: str) -> Path:
