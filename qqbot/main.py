@@ -197,11 +197,11 @@ class ChatBot:
                         memory_update_messages = []
                     else:
                         # 取最后的 max_messages_history 条放入队列，前面的用于更新 memory
-                        memory_update_messages =history_messages[:-max_history//2]
+                        memory_update_messages = history_messages[:-max_history//2]
                         queue_messages = history_messages[-max_history//2:]
                     # 更新消息队列
                     new_queue = deque(maxlen=settings.get('max_messages_history'))
-                    new_queue.extend(history_messages)
+                    new_queue.extend(queue_messages)
                     self.message_queues[group_id] = new_queue
                     if memory_update_messages:
                         asyncio.create_task(self.memory_service.update_memory(group_id, memory_update_messages))
@@ -223,14 +223,14 @@ class ChatBot:
                             history_messages.append(processed_msg)
                             
                     max_history = settings.get('max_messages_history')        
-                    if len(messages) <= max_history:
+                    if len(history_messages) <= max_history:
                         # 消息数量不足，全部放入队列
-                        queue_messages = messages
+                        queue_messages = history_messages
                         init_memory_messages = []
                     else:
                         # 取最后的 max_messages_history 条放入队列，前面的用于初始化 memory
-                        init_memory_messages = messages[:-max_history]
-                        queue_messages = messages[-max_history:]
+                        init_memory_messages = history_messages[:-max_history]
+                        queue_messages = history_messages[-max_history:]
                     
                     
                     # 更新消息队列
@@ -238,7 +238,8 @@ class ChatBot:
                     new_queue.extend(queue_messages)
                     self.message_queues[group_id] = new_queue
 
-                    asyncio.create_task(self.memory_service._generate_initial_memory_from_messages(group_id, init_memory_messages))
+                    if init_memory_messages:  # Only generate initial memory if there are messages to process
+                        asyncio.create_task(self.memory_service._generate_initial_memory_from_messages(group_id, init_memory_messages))
                     group_state["has_history"] = True
 
         history = self.message_queues[group_id]

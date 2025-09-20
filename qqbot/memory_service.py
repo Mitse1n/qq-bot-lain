@@ -257,6 +257,7 @@ class GroupMemoryService:
             print(f"Fetched {len(messages)} messages for group {group_id}")
             
             if len(messages) == 0:
+                print(f"No messages found for group {group_id}")
                 return False
             
             senders_text = self._get_senders_text(messages)
@@ -343,6 +344,10 @@ class GroupMemoryService:
     async def _generate_initial_memory_from_messages(self, group_id: int, messages: List[Message]) -> bool:
         """Generate initial memory from a list of Message objects."""
         try:
+            if not messages:
+                print(f"No messages provided for initial memory generation for group {group_id}")
+                return False
+                
             senders_text = self._get_senders_text(messages)
             
             # Get sequence numbers (using approximation since we don't have real_seq in Message objects)
