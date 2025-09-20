@@ -7,13 +7,30 @@ VERSION = $(shell date +%Y%m%d-%H%M%S)
 LATEST_TAG = $(IMAGE_NAME):latest
 VERSION_TAG = $(IMAGE_NAME):$(VERSION)
 
+# 本地运行（开发模式）
+.PHONY: run
+run:
+	@echo "启动本地开发环境..."
+	@echo "1. 同步依赖..."
+	uv sync
+	@echo "2. 启动应用..."
+	source .venv/bin/activate && python qqbot/main.py
+
+# 安装依赖
+.PHONY: install
+install:
+	@echo "安装项目依赖..."
+	uv sync
+
 .PHONY: deploy
 deploy:
 	@echo "开始部署 QQ Bot..."
 	@echo "版本: $(VERSION)"
-	@echo "1. 构建新镜像..."
+	@echo "1. 同步依赖..."
+	uv sync
+	@echo "2. 构建新镜像..."
 	docker build -t $(LATEST_TAG) -t $(VERSION_TAG) .
-	@echo "2. 检查并准备配置文件..."
+	@echo "3. 检查并准备配置文件..."
 	@if [ ! -f config.yaml ]; then \
 		echo "本地未找到 config.yaml，从镜像中复制默认配置..."; \
 		docker run --rm -v $(shell pwd):/host $(LATEST_TAG) cp /app/config.yaml /host/config.yaml; \
@@ -21,12 +38,12 @@ deploy:
 	else \
 		echo "使用现有的 config.yaml 配置文件"; \
 	fi
-	@echo "3. 停止并删除旧容器..."
+	@echo "4. 停止并删除旧容器..."
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	@echo "4. 运行新容器..."
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host $(LATEST_TAG)
-	@echo "5. 清理旧镜像（保留最近3个版本）..."
+	@echo "5. 运行新容器..."
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host -v $(shell pwd)/data:/app/data $(LATEST_TAG)
+	@echo "6. 清理旧镜像（保留最近3个版本）..."
 	@docker images $(IMAGE_NAME) --format "{{.Tag}}" | grep -v latest | tail -n +4 | xargs -I {} docker rmi $(IMAGE_NAME):{} 2>/dev/null || true
 	@echo "清理完成，保留最近3个版本"
 	@echo "部署完成！"
@@ -77,7 +94,7 @@ rollback-to:
 	fi
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host $(IMAGE_NAME):$(VERSION)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host -v $(shell pwd)/data:/app/data $(IMAGE_NAME):$(VERSION)
 	@echo "回滚完成！"
 
 # 清理旧版本镜像（保留最近3个版本）
