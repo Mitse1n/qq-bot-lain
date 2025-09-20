@@ -43,6 +43,7 @@ class GroupMemoryService:
         self.group_memory_initialized: Dict[int, bool] = {}
         # Cache for group memories
         self.group_memories: Dict[int, Memory] = {}
+        self.memory_operation_locks: set()
         # This is now handled by ChatBot's message_queues - no longer needed here
         
     def _get_memory_file_path(self, group_id: int, first_seq: str, last_seq: str) -> Path:
@@ -238,6 +239,13 @@ class GroupMemoryService:
         Only generates memory if at least 400 messages are available.
         Returns True if initialization was successful.
         """
+        
+        if group_id in self.memory_operation_locks:
+            return True
+        
+        self.memory_operation_locks.add(group_id)
+        print(f"Acquired memory operation lock for group {group_id}")
+        
         if self.group_memory_initialized.get(group_id, False):
             return True
             
@@ -322,8 +330,18 @@ class GroupMemoryService:
         except Exception as e:
             print(f"Error initializing memory for group {group_id}: {e}")
             return False
+        
+        finally:
+            self.memory_operation_locks.discard(group_id)
+            print(f"Released memory operation lock for group {group_id}")
     
     async def update_memory(self, group_id: int, messages: List[Message]) -> bool:
+        if group_id in self.memory_operation_locks:
+            return True
+        
+        self.memory_operation_locks.add(group_id)
+        print(f"Acquired memory operation lock for group {group_id}")
+        
         if not messages:
             return False
             
@@ -333,13 +351,16 @@ class GroupMemoryService:
             current_memory = await self.get_group_memory(group_id)
             
             if not current_memory:
-                return await self._generate_initial_memory_from_messages(group_id, messages)
+                await self._generate_initial_memory_from_messages(group_id, messages)
             else:
-                return await self.update_group_memory(group_id, messages)
+                await self.update_group_memory(group_id, messages)
                 
         except Exception as e:
             print(f"Error processing quarter batch for group {group_id}: {e}")
             return False
+        finally:
+            self.memory_operation_locks.discard(group_id)
+            print(f"Released memory operation lock for group {group_id}")
     
     async def _generate_initial_memory_from_messages(self, group_id: int, messages: List[Message]) -> bool:
         """Generate initial memory from a list of Message objects."""

@@ -246,14 +246,14 @@ class ChatBot:
         
         group_memory = await self.memory_service.get_group_memory(group_id)
         if group_memory:
-            print(f"Using memory for group {group_id}: {group_memory[:5]}...")
+            print(f"Using memory for group {group_id}: {group_memory.memory[:200]}...")
         else:
             print(f"No memory for group {group_id}")
 
         response_sentence = ""
         first_chunk = True
         try:
-            async for chunk in self.gemini_service.generate_content_stream(history, group_memory or ""):
+            async for chunk in self.gemini_service.generate_content_stream(history, group_memory.memory if group_memory else ""):
                 if chunk.text is not None:
                     response_sentence += chunk.text
                     parts = response_sentence.split("\n\n")
