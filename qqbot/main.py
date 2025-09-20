@@ -169,7 +169,7 @@ class ChatBot:
                 group_id, count=int(settings.get('max_messages_history') * 4)
             )
             if history_response and history_response.data:
-                group_memory = self.memory_service.get_group_memory(group_id)
+                group_memory = await self.memory_service.get_group_memory(group_id)
 
                 if group_memory:
                     memory_last_seq = group_memory.last_seq
@@ -241,7 +241,7 @@ class ChatBot:
 
         history = self.message_queues[group_id]
         
-        group_memory = self.memory_service.get_group_memory(group_id)
+        group_memory = await self.memory_service.get_group_memory(group_id)
         if group_memory:
             print(f"Using memory for group {group_id}: {group_memory[:5]}...")
         else:
