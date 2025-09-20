@@ -178,6 +178,7 @@ class ChatBot:
                     messages = history_response.data.messages
                     start_index = self._binary_search_seq(messages, memory_last_seq)
                     history_messages = []
+                    max_history = settings.get('max_messages_history')
                     for msg in messages[start_index:]:
                         if not (msg.sender and msg.message):
                             continue
@@ -209,6 +210,7 @@ class ChatBot:
                 else:
                     # 当没有 group_memory 时，初始化 memory
                     messages = history_response.data.messages
+                    history_messages = []
 
                     for msg in messages:
                         if not (msg.sender and msg.message):
