@@ -60,6 +60,12 @@ class ForwardData(BaseModel):
     id: str
 
 
+class FileData(BaseModel):
+    file: str
+    url: Optional[str] = None
+    file_size: Optional[str] = None
+
+
 class TextMessageSegment(BaseModel):
     type: Literal["text"]
     data: TextData
@@ -105,6 +111,11 @@ class ForwardMessageSegment(BaseModel):
     data: ForwardData
 
 
+class FileMessageSegment(BaseModel):
+    type: Literal["file"]
+    data: FileData
+
+
 MessageSegment = Annotated[
     Union[
         TextMessageSegment,
@@ -116,6 +127,7 @@ MessageSegment = Annotated[
         RecordMessageSegment,
         VideoMessageSegment,
         ForwardMessageSegment,
+        FileMessageSegment,
     ],
     Field(discriminator="type"),
 ]
@@ -181,7 +193,7 @@ class Message:
             
         return cls(
             timestamp=timestamp,
-            user_id="system",
+            user_id="0",  # 使用 "0" 作为系统消息的用户ID
             nickname="system",
             content=[TextMessageSegment(type="text", data=TextData(text=text))]
         )
@@ -221,6 +233,8 @@ class Message:
                     text_parts.append(f"[{image_count}]")
             elif isinstance(segment, AtMessageSegment):
                 text_parts.append(f"@{segment.data.qq}")
+            elif isinstance(segment, FileMessageSegment):
+                text_parts.append("[文件]")
         return "".join(text_parts), image_count
 
     def get_images(self) -> List[str]:
