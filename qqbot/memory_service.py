@@ -39,7 +39,6 @@ class GroupMemoryService:
         self.memory_dir.mkdir(exist_ok=True)
         
         # Track message counts per group for periodic updates
-        self.group_message_counts: Dict[int, int] = {}
         # Track if memory has been initialized for each group
         self.group_memory_initialized: Dict[int, bool] = {}
         # Cache for group memories
@@ -225,7 +224,6 @@ class GroupMemoryService:
                       f"will accumulate until {self.MINIMUM_MESSAGES_FOR_MEMORY} messages are reached")
                 # With the new unified design, initial memory generation is handled by ChatBot
                 # when it accumulates enough messages in its deque
-                self.group_message_counts[group_id] = len(messages)
                 return False  # Not enough messages to generate initial memory yet
             
             # Get sequence numbers for filename
@@ -234,8 +232,9 @@ class GroupMemoryService:
             
             # Process first batch of messages (oldest)
             first_batch = messages[:self.INITIAL_BATCH_SIZE] if len(messages) >= self.INITIAL_BATCH_SIZE else messages
-            first_batch_text = self._format_messages_for_memory(first_batch)
-            
+            first_batch_text = "\n".join(
+                msg.get_formatted_text(False)[0] for msg in first_batch
+            )
             if not first_batch_text.strip():
                 print(f"No valid text content found in messages for group {group_id}")
                 return False
@@ -252,8 +251,9 @@ class GroupMemoryService:
             # Process remaining messages if any
             if len(messages) > self.INITIAL_BATCH_SIZE:
                 remaining_batch = messages[self.INITIAL_BATCH_SIZE:]
-                remaining_batch_text = self._format_messages_for_memory(remaining_batch)
-                
+                remaining_batch_text = "\n".join(
+                msg.get_formatted_text(False)[0] for msg in remaining_batch
+                )
                 if remaining_batch_text.strip():
                     update_prompt = self._get_update_memory_prompt(memory_content, remaining_batch_text, senders_text)
                     
@@ -270,9 +270,7 @@ class GroupMemoryService:
             self.group_memories[group_id] = Memory(
                 group_id, first_seq, last_seq, memory_content
             )
-            self.group_memory_initialized[group_id] = True
-            self.group_message_counts[group_id] = len(messages)
-            
+            self.group_memory_initialized[group_id] = True            
             print(f"Successfully initialized memory for group {group_id}")
             return True
             
@@ -316,51 +314,7 @@ class GroupMemoryService:
         finally:
             self.memory_operation_locks.discard(group_id)
             print(f"Released memory operation lock for group {group_id}")
-    
-    async def _generate_initial_memory_from_messages(self, group_id: int, messages: List[Message]) -> List[Message]:
-        """Generate initial memory from a list of Message objects."""
-        try:
-            if not messages:
-                print(f"No messages provided for initial memory generation for group {group_id}")
-                return False
-                
-            senders_text = self._get_senders_text(messages)
-            
-            
-            messages_formatted = ""
-            messages_formatted = "\n".join(
-                msg.get_formatted_text(False)[0] for msg in messages
-            )
-            if not messages_formatted.strip():
-                print(f"No valid text content found in messages for group {group_id}")
-                return False
-            
-            # Generate initial memory
-            initial_prompt = self._get_initial_memory_prompt(messages_formatted, senders_text)
-            
-            memory_content = await self._generate_memory_with_llm(initial_prompt)
-            
-            if not memory_content:
-                print(f"Failed to generate initial memory for group {group_id}")
-                return False
-            first_seq = str(int(messages[0].real_seq))
-            last_seq = str(int(messages[-1].real_seq))
-            # Save memory to file
-            memory_file = self._get_memory_file_path(group_id, first_seq, last_seq)
-            with open(memory_file, 'w', encoding='utf-8') as f:
-                f.write(memory_content)
-            
-            # Cache the memory and mark as initialized
-            self.group_memories[group_id] = Memory(group_id, first_seq, last_seq, memory_content)
-            self.group_memory_initialized[group_id] = True
-            
-            print(f"Successfully generated initial memory for group {group_id}")
-            return messages
-            
-        except Exception as e:
-            print(f"Error generating initial memory for group {group_id}: {e}")
-            return False
-    
+        
     async def _update_group_memory(self, group_id: int, messages: List[Message]) -> bool:
         """
         Update group memory with new messages.
