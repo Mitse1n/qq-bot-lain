@@ -233,9 +233,9 @@ class GeminiService:
         # Handle both single API key and list of API keys
         api_keys = settings.get('gemini_api_key')
         if isinstance(api_keys, list):
-            self.api_keys = api_keys
+            self.api_keys = [str(key) for key in api_keys]  # Ensure all keys are strings
         else:
-            self.api_keys = [api_keys]
+            self.api_keys = [str(api_keys)]  # Ensure single key is also a string
         
         self.current_key_index = random.randint(0, len(self.api_keys) - 1)
         self.client = genai.Client(api_key=self.api_keys[self.current_key_index])
@@ -255,7 +255,7 @@ class GeminiService:
         """Rotate to the next API key in the list"""
         time.sleep(random.uniform(1, 2))
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-        new_api_key = self.api_keys[self.current_key_index]
+        new_api_key = str(self.api_keys[self.current_key_index])  # Ensure API key is a string
         self.client = genai.Client(api_key=new_api_key)
         print(f"Rotated to API key index {self.current_key_index}")
         return new_api_key
