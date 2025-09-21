@@ -170,11 +170,11 @@ class ChatBot:
                 group_memory = await self.memory_service.get_group_memory(group_id)
                 start_index = 0
                 messages = history_response.data.messages
+                history_messages = []
+                max_history = settings.get('max_messages_history')
                 if group_memory:
                     memory_last_seq = group_memory.last_seq
                     start_index = self._binary_search_seq(messages, memory_last_seq)
-                    history_messages = []
-                    max_history = settings.get('max_messages_history')
                 
                 messages = messages[start_index:]
                 for msg in messages:
