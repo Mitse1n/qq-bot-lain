@@ -1,4 +1,5 @@
 import dataclasses
+from email import message
 import os
 import asyncio
 import json
@@ -201,68 +202,16 @@ class GroupMemoryService:
             print(f"Error generating memory with LLM: {e}")
             return ""
     
-    def _format_messages_for_memory(self, messages: List[GroupHistoryMessageEvent]) -> str:
-        """Format messages for memory processing."""
-        formatted_messages = []
-        
-        for msg in messages:
-            if not msg.sender or not msg.message:
-                continue
-                
-            # Extract text content from message segments
-            text_parts = []
-            for segment in msg.message:
-                if hasattr(segment, 'type') and segment.type == "text":
-                    text_parts.append(segment.data.text)
-                elif hasattr(segment, 'type') and segment.type == "at":
-                    text_parts.append(f"@{segment.data.qq}")
-                elif hasattr(segment, 'type') and segment.type == "image":
-                    text_parts.append("[图片]")
-                elif hasattr(segment, 'type') and segment.type == "file":
-                    text_parts.append("[文件]")
-            
-            message_text = "".join(text_parts).strip()
-            if message_text:
-                timestamp = datetime.fromtimestamp(msg.time).strftime('%m-%d %H:%M')
-                user_info = str(msg.user_id)
-                formatted_messages.append(f"({timestamp}) {user_info}: {message_text}")
-        
-        return "\n".join(formatted_messages)
-    
-    async def _convert_history_message_to_message(self, msg: GroupHistoryMessageEvent) -> Optional[Message]:
-        """Convert a GroupHistoryMessageEvent to a Message object."""
-        return Message.from_history_event(msg)
-    
-    async def initialize_group_memory(self, group_id: int) -> bool:
+    async def _initialize_group_memory(self, group_id: int, messages: List[Message]) -> bool:
         """
         Initialize memory for a new group by fetching recent messages and processing them.
         Only generates memory if at least 400 messages are available.
         Returns True if initialization was successful.
         """
         
-        if group_id in self.memory_operation_locks:
-            return True
-        
-        self.memory_operation_locks.add(group_id)
-        print(f"Acquired memory operation lock for group {group_id}")
-        
-        if self.group_memory_initialized.get(group_id, False):
-            return True
-            
         print(f"Initializing memory for group {group_id}")
         
         try:
-            # Fetch the most recent 1600 messages
-            history_response = await self.chat_service.get_group_msg_history(
-                group_id, count=1600
-            )
-            
-            if not history_response or not history_response.data or not history_response.data.messages:
-                print(f"No messages found for group {group_id}")
-                return False
-            
-            messages = history_response.data.messages
-            print(f"Fetched {len(messages)} messages for group {group_id}")
             
             if len(messages) == 0:
                 print(f"No messages found for group {group_id}")
@@ -332,18 +281,16 @@ class GroupMemoryService:
             return False
         
         finally:
-            self.memory_operation_locks.discard(group_id)
             print(f"Released memory operation lock for group {group_id}")
     
     async def update_memory(self, group_id: int, messages: List[Message]) -> bool:
         if group_id in self.memory_operation_locks:
             return True
-        
         self.memory_operation_locks.add(group_id)
         print(f"Acquired memory operation lock for group {group_id}")
         
         if not messages:
-            return False
+            return True
             
         print(f"Processing half batch of {len(messages)} messages for group {group_id}")
         try:
@@ -351,10 +298,18 @@ class GroupMemoryService:
             current_memory = await self.get_group_memory(group_id)
             
             if not current_memory:
-                await self._generate_initial_memory_from_messages(group_id, messages)
-            else:
-                await self.update_group_memory(group_id, messages)
-                
+                await self._initialize_group_memory(group_id, messages)
+                messages = messages[self.MEMORY_UPDATE_INTERVAL:] if len(messages) > self.MEMORY_UPDATE_INTERVAL else []
+                # 重新获取更新后的memory信息
+                current_memory = await self.get_group_memory(group_id)
+            while messages:
+                if current_memory:
+                    messages = [msg for msg in messages if int(msg.real_seq) >= int(current_memory.last_seq)]
+                if not messages:  # 如果过滤后没有消息需要处理，退出循环
+                    break
+                await self._update_group_memory(group_id, messages)
+                current_memory = await self.get_group_memory(group_id)
+                messages = messages[self.MEMORY_UPDATE_INTERVAL:] if len(messages) > self.MEMORY_UPDATE_INTERVAL else []
         except Exception as e:
             print(f"Error processing quarter batch for group {group_id}: {e}")
             return False
@@ -362,7 +317,7 @@ class GroupMemoryService:
             self.memory_operation_locks.discard(group_id)
             print(f"Released memory operation lock for group {group_id}")
     
-    async def _generate_initial_memory_from_messages(self, group_id: int, messages: List[Message]) -> bool:
+    async def _generate_initial_memory_from_messages(self, group_id: int, messages: List[Message]) -> List[Message]:
         """Generate initial memory from a list of Message objects."""
         try:
             if not messages:
@@ -371,40 +326,25 @@ class GroupMemoryService:
                 
             senders_text = self._get_senders_text(messages)
             
-            # Get sequence numbers (using approximation since we don't have real_seq in Message objects)
-            first_seq = str(int(messages[0].timestamp.timestamp()))
-            last_seq = str(int(messages[-1].timestamp.timestamp()))
             
-            # Process first batch of messages (or all if fewer)
-            first_batch = messages[:self.INITIAL_BATCH_SIZE] if len(messages) >= self.INITIAL_BATCH_SIZE else messages
-            first_batch_formatted = self._format_messages_for_memory_from_messages(first_batch)
-            
-            if not first_batch_formatted.strip():
+            messages_formatted = ""
+            messages_formatted = "\n".join(
+                msg.get_formatted_text(False)[0] for msg in messages
+            )
+            if not messages_formatted.strip():
                 print(f"No valid text content found in messages for group {group_id}")
                 return False
             
             # Generate initial memory
-            initial_prompt = self._get_initial_memory_prompt(first_batch_formatted, senders_text)
+            initial_prompt = self._get_initial_memory_prompt(messages_formatted, senders_text)
             
             memory_content = await self._generate_memory_with_llm(initial_prompt)
             
             if not memory_content:
                 print(f"Failed to generate initial memory for group {group_id}")
                 return False
-            
-            # Process remaining messages if any
-            if len(messages) > self.INITIAL_BATCH_SIZE:
-                remaining_batch = messages[self.INITIAL_BATCH_SIZE:]
-                remaining_batch_formatted = self._format_messages_for_memory_from_messages(remaining_batch)
-                
-                if remaining_batch_formatted.strip():
-                    update_prompt = self._get_update_memory_prompt(memory_content,
-                                                                   remaining_batch_formatted, senders_text)
-                    
-                    updated_memory = await self._generate_memory_with_llm(update_prompt)
-                    if updated_memory:
-                        memory_content = updated_memory
-            
+            first_seq = str(int(messages[0].real_seq))
+            last_seq = str(int(messages[-1].real_seq))
             # Save memory to file
             memory_file = self._get_memory_file_path(group_id, first_seq, last_seq)
             with open(memory_file, 'w', encoding='utf-8') as f:
@@ -413,41 +353,15 @@ class GroupMemoryService:
             # Cache the memory and mark as initialized
             self.group_memories[group_id] = Memory(group_id, first_seq, last_seq, memory_content)
             self.group_memory_initialized[group_id] = True
-            self.group_message_counts[group_id] = len(messages)
             
             print(f"Successfully generated initial memory for group {group_id}")
-            return True
+            return messages
             
         except Exception as e:
             print(f"Error generating initial memory for group {group_id}: {e}")
             return False
     
-    def _format_messages_for_memory_from_messages(self, messages: List[Message]) -> str:
-        """Format Message objects for memory processing."""
-        formatted_messages = []
-        
-        for msg in messages:
-            # Extract text content from message segments
-            text_parts = []
-            for segment in msg.content:
-                if hasattr(segment, 'type') and segment.type == "text":
-                    text_parts.append(segment.data.text)
-                elif hasattr(segment, 'type') and segment.type == "at":
-                    text_parts.append(f"@{segment.data.qq}")
-                elif hasattr(segment, 'type') and segment.type == "image":
-                    text_parts.append("[图片]")
-                elif hasattr(segment, 'type') and segment.type == "file":
-                    text_parts.append("[文件]")
-            
-            message_text = "".join(text_parts).strip()
-            if message_text:
-                timestamp = msg.timestamp.strftime('%m-%d %H:%M')
-                user_info = str(msg.user_id)
-                formatted_messages.append(f"({timestamp}) {user_info}: {message_text}")
-        
-        return "\n".join(formatted_messages)
-    
-    async def update_group_memory(self, group_id: int, new_messages: List[Message]) -> bool:
+    async def _update_group_memory(self, group_id: int, messages: List[Message]) -> bool:
         """
         Update group memory with new messages.
         Returns True if update was successful.
@@ -455,67 +369,33 @@ class GroupMemoryService:
         try:
             # Load existing memory
             current_memory = await self.get_group_memory(group_id)
-            if not current_memory:
-                # If no memory exists, try to initialize it first
-                if not await self.initialize_group_memory(group_id):
-                    return False
-                #TODO: 这里在做什么?
-                current_memory = await self.get_group_memory(group_id)
+            
+            # Filter out messages that are older than the last processed sequence
+            # Use list comprehension to avoid modifying list while iterating
+            current_messages = [msg for msg in messages if int(msg.real_seq) >= int(current_memory.last_seq)]
             
             # Format new messages
-            formatted_new_messages = []
-            for msg in new_messages:
-                # Convert Message to a format similar to GroupHistoryMessageEvent
-                text_parts = []
-                for segment in msg.content:
-                    if hasattr(segment, 'type') and segment.type == "text":
-                        text_parts.append(segment.data.text)
-                    elif hasattr(segment, 'type') and segment.type == "at":
-                        text_parts.append(f"@{segment.data.qq}")
-                    elif hasattr(segment, 'type') and segment.type == "image":
-                        text_parts.append("[图片]")
-                    elif hasattr(segment, 'type') and segment.type == "file":
-                        text_parts.append("[文件]")
-                
-                message_text = "".join(text_parts).strip()
-                if message_text:
-                    timestamp = msg.timestamp.strftime('%m-%d %H:%M')
-                    user_info = str(msg.user_id)
-                    formatted_new_messages.append(f"({timestamp}) {user_info}: {message_text}")
-            
-            if not formatted_new_messages:
-                return True  # No valid messages to process
-            
-            new_messages_text = "\n".join(formatted_new_messages)
-            
-            senders_text = self._get_senders_text(new_messages)
-            
+            new_messages_text = "\n".join(
+                msg.get_formatted_text(False)[0] for msg in current_messages
+            )
+            senders_text = self._get_senders_text(current_messages)
+            if not new_messages_text.strip():
+                print(f"No new valid text content to update memory for group {group_id}")
+                return True
             # Generate updated memory
-            update_prompt = self._get_update_memory_prompt(current_memory, new_messages_text, senders_text)
+            update_prompt = self._get_update_memory_prompt(current_memory.memory, new_messages_text, senders_text)
             
             updated_memory = await self._generate_memory_with_llm(update_prompt)
             
             if not updated_memory:
                 print(f"Failed to generate updated memory for group {group_id}")
                 return False
-            
-            # Get the latest memory file to update sequence numbers
-            latest_file = self._get_latest_memory_file(group_id)
-            if latest_file:
-                first_seq, _ = self._extract_seq_from_filename(latest_file)
-                # Remove old file
-
-                #TODO: delete or not?
-                # latest_file.unlink()
-            else:
-                first_seq = new_messages[0].real_seq if new_messages and hasattr(new_messages[0], 'real_seq') else "0"
-            
             # Use the sequence from the last message
-            last_seq = "0"  # Default fallback
-            if new_messages:
+
                 # We don't have real_seq in Message objects, so we'll use timestamp as approximation
-                last_seq = str(int(new_messages[-1].timestamp.timestamp()))
-            
+            first_seq = str(int(current_messages[0].real_seq))
+            last_seq = str(int(current_messages[-1].real_seq))
+
             # Save updated memory
             memory_file = self._get_memory_file_path(group_id, first_seq, last_seq)
             with open(memory_file, 'w', encoding='utf-8') as f:
@@ -530,14 +410,7 @@ class GroupMemoryService:
         except Exception as e:
             print(f"Error updating memory for group {group_id}: {e}")
             return False
-    
-    def get_cached_memory(self, group_id: int) -> Optional[Memory]:
-        """
-        Get the cached memory for a group without any I/O operations.
-        This is non-blocking and safe to use in response paths.
-        """
-        return self.group_memories.get(group_id)
-    
+        
     async def get_group_memory(self, group_id: int) -> Optional[Memory]:
         """
         Get the current memory for a group.
@@ -564,31 +437,3 @@ class GroupMemoryService:
                 print(f"Error reading memory file for group {group_id}: {e}")
         
         return None
-    
-    # These methods are no longer needed with the new unified message management
-    
-    def is_memory_initialized(self, group_id: int) -> bool:
-        """Check if memory has been initialized for a group."""
-        return self.group_memory_initialized.get(group_id, False)
-    
-    def is_accumulating_messages(self, group_id: int) -> bool:
-        """Check if a group is in message accumulation mode (waiting for initial memory generation)."""
-        # With the new design, we consider a group "accumulating" if memory is not yet initialized
-        return not self.group_memory_initialized.get(group_id, False)
-    
-    def get_accumulated_message_count(self, group_id: int) -> int:
-        """This method is deprecated with the new unified message storage design."""
-        # Return 0 since we no longer track this separately
-        return 0
-    
-    async def preload_memory_async(self, group_id: int):
-        """
-        Preload memory for a group in the background.
-        This ensures memory is available in cache for fast access during responses.
-        """
-        if group_id not in self.group_memories:
-            memory = await self.get_group_memory(group_id)
-            if memory:
-                print(f"Preloaded memory for group {group_id}")
-            else:
-                print(f"No memory found to preload for group {group_id}")
