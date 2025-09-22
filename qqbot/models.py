@@ -1,7 +1,7 @@
 from typing import List, Literal, Union, Annotated, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-
+import time
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -251,5 +251,64 @@ class GroupMessageHistoryResponse(BaseModel):
     message: str
     wording: str
     echo: Optional[str] = None
+
+
+class TokenBucket:
+    """Token bucket for rate limiting. Allows max_tokens per time_window."""
+    
+    def __init__(self, max_tokens: int = 3, time_window: int = 3600):
+        """
+        Initialize token bucket.
+        
+        Args:
+            max_tokens: Maximum number of tokens (default: 3)
+            time_window: Time window in seconds (default: 3600 = 1 hour)
+        """
+        self.max_tokens = max_tokens
+        self.time_window = time_window
+        self.tokens = max_tokens
+        self.last_refill = time.time()
+    
+    def consume(self) -> bool:
+        """
+        Try to consume a token.
+        
+        Returns:
+            True if token was consumed, False if no tokens available
+        """
+        self._refill()
+        if self.tokens > 0:
+            self.tokens -= 1
+            return True
+        return False
+    
+    def time_until_next_token(self) -> int:
+        """
+        Calculate minutes until next token is available.
+        
+        Returns:
+            Minutes until next token (minimum 1)
+        """
+        self._refill()
+        if self.tokens > 0:
+            return 0
+        
+        # Calculate time since last refill
+        time_since_refill = time.time() - self.last_refill
+        time_until_refill = self.time_window - time_since_refill
+        
+        # Convert to minutes and ensure minimum of 1
+        minutes = max(1, int(time_until_refill / 60))
+        return minutes
+    
+    def _refill(self):
+        """Refill tokens based on elapsed time."""
+        now = time.time()
+        time_passed = now - self.last_refill
+        
+        if time_passed >= self.time_window:
+            # Full refill if time window has passed
+            self.tokens = self.max_tokens
+            self.last_refill = now
 
 

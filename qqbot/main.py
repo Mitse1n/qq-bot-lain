@@ -14,6 +14,7 @@ from qqbot.models import (
     Message,
     TextData,
     MessageSegment,
+    TokenBucket,
 )
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
 
@@ -30,6 +31,10 @@ class ChatBot:
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
         self.active_group_tasks = set()  # Per-group concurrency control
+        self.rate_limiters = defaultdict(lambda: TokenBucket(
+            max_tokens=settings.get('rate_limit.max_messages_per_hour', 3),
+            time_window=settings.get('rate_limit.time_window_seconds', 3600)
+        ))
 
     async def run(self):
         print("Lain Bot is running...")
@@ -98,6 +103,15 @@ class ChatBot:
         group_id = event.group_id
         if group_id in self.active_group_tasks:
             print(f"Task for group {group_id} already in progress. Ignoring.")
+            return
+
+        # 检查限流
+        rate_limiter = self.rate_limiters[group_id]
+        if not rate_limiter.consume():
+            # Token 用完了，发送冷却消息
+            minutes_left = rate_limiter.time_until_next_token()
+            cooldown_message = f" 服务器冷却中，请{minutes_left}分钟后再试"
+            await self.chat_service.send_group_message(group_id, cooldown_message, event.message_id, event.user_id)
             return
 
         self.active_group_tasks.add(group_id)
