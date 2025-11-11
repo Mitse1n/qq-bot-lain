@@ -495,7 +495,7 @@ class GeminiService:
                     print(f"Rate limit exceeded (429). Rotating API key...")
                     self._rotate_api_key()
                     keys_tried += 1
-                    if attempt > max_retries:
+                    if attempt >= max_retries:
                         raise e
                     continue
                 
