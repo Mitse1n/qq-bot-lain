@@ -240,7 +240,7 @@ class GeminiService:
         self.current_key_index = random.randint(0, len(self.api_keys) - 1)
         self.client = genai.Client(api_key=self.api_keys[self.current_key_index])
         #self.model_name = "gemma-3-27b-it"
-        self.model_name = "gemini-2.5-pro"
+        self.model_name = settings.get('gemini_model_name')
         self.small_model_name = "gemma-3-27b-it"
         self.max_messages_history = settings.get('max_messages_history')
         self.image_service = image_service
