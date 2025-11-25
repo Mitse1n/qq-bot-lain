@@ -19,6 +19,59 @@ from qqbot.models import (
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
 
 
+def split_message_stream(current_buffer: str, new_chunk: str, min_length: int = 400) -> tuple[list[str], str]:
+    """
+    Split message stream into parts based on \n\n separator with a minimum length threshold.
+    
+    Args:
+        current_buffer: The current accumulated message buffer
+        new_chunk: New chunk of text to append
+        min_length: Minimum length for a part to be split out (default: 400)
+        
+    Returns:
+        tuple: (list of ready parts to send, remaining buffer)
+    """
+    buffer = current_buffer + new_chunk
+    parts = buffer.split("\n\n")
+    
+    # If there's only one part (no separator found), keep accumulating
+    if len(parts) == 1:
+        return [], buffer
+    
+    ready_parts = []
+    remaining_buffer = ""
+    
+    # Process all parts except the last one (which might be incomplete)
+    for i, part in enumerate(parts[:-1]):
+        if not part:  # Skip empty parts
+            continue
+            
+        # If we have a remaining buffer, check if combining makes sense
+        if remaining_buffer:
+            combined = remaining_buffer + "\n\n" + part
+            if len(combined) >= min_length:
+                ready_parts.append(combined)
+                remaining_buffer = ""
+            else:
+                # Keep accumulating if under threshold
+                remaining_buffer = combined
+        else:
+            # Start new buffer or emit if long enough
+            if len(part) >= min_length:
+                ready_parts.append(part)
+            else:
+                remaining_buffer = part
+    
+    # Handle the last part (potentially incomplete)
+    last_part = parts[-1]
+    if remaining_buffer:
+        remaining_buffer = remaining_buffer + "\n\n" + last_part if last_part else remaining_buffer
+    else:
+        remaining_buffer = last_part
+    
+    return ready_parts, remaining_buffer
+
+
 class ChatBot:
     def __init__(self):
         self.http_client = httpx.AsyncClient()
@@ -153,48 +206,47 @@ class ChatBot:
                 group_state["has_history"] = True
 
         history = self.message_queues[group_id]
-        response_sentence = ""
+        response_buffer = ""
         first_chunk = True
         try:
             async for chunk in self.gemini_service.generate_content_stream(history):
                 if chunk.text is not None:
-                    response_sentence += chunk.text
-                    parts = response_sentence.split("\n\n")
-                    if len(parts) > 1:
-                        for part in parts[:-1]:
-                            if part:  # 确保不发送空消息
-                                if first_chunk:
-                                    await self.chat_service.send_group_message(
-                                        group_id, " " +part, reply_id, mention_id
+                    ready_parts, response_buffer = split_message_stream(
+                        response_buffer, chunk.text, min_length=400
+                    )
+                    
+                    for part in ready_parts:
+                        if first_chunk:
+                            await self.chat_service.send_group_message(
+                                group_id, " " + part, reply_id, mention_id
+                            )
+                            first_chunk = False
+                        else:
+                            await self.chat_service.send_group_message(
+                                group_id, part
+                            )
+                        self.message_queues[group_id].append(
+                            Message(
+                                timestamp=datetime.now(),
+                                user_id=settings.get("bot_qq_id"),
+                                nickname=settings.get("bot_name"),
+                                content=[
+                                    TextMessageSegment(
+                                        type="text",
+                                        data=TextData(text=part),
                                     )
-                                    first_chunk = False
-                                else:
-                                    await self.chat_service.send_group_message(
-                                        group_id, part
-                                    )
-                                self.message_queues[group_id].append(
-                                    Message(
-                                        timestamp=datetime.now(),
-                                        user_id=settings.get("bot_qq_id"),
-                                        nickname=settings.get("bot_name"),
-                                        content=[
-                                            TextMessageSegment(
-                                                type="text",
-                                                data=TextData(text=part),
-                                            )
-                                        ],
-                                    )
-                                )
-                        response_sentence = parts[-1]
+                                ],
+                            )
+                        )
 
-            if response_sentence:  # 发送剩余的消息
+            if response_buffer:  # 发送剩余的消息
                 if first_chunk:
                     await self.chat_service.send_group_message(
-                        group_id, " " + response_sentence, reply_id, mention_id
+                        group_id, " " + response_buffer, reply_id, mention_id
                     )
                 else:
                     await self.chat_service.send_group_message(
-                        group_id, response_sentence
+                        group_id, response_buffer
                     )
                 self.message_queues[group_id].append(
                     Message(
@@ -203,7 +255,7 @@ class ChatBot:
                         nickname=settings.get("bot_name"),
                         content=[
                             TextMessageSegment(
-                                type="text", data=TextData(text=response_sentence)
+                                type="text", data=TextData(text=response_buffer)
                             )
                         ],
                     )
