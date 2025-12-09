@@ -484,7 +484,9 @@ class GeminiService:
                 stream = self.client.aio.models.generate_content_stream(
                     model=self.model_name, 
                     contents=content_parts,                    
-                    config=types.GenerateContentConfig(tools=[grounding_tool])
+                    config=types.GenerateContentConfig(tools=[grounding_tool],
+                                                       thinking_config=types.ThinkingConfig(thinking_level="low")),
+                    
                 )
                 async for chunk in await stream:
                     yield chunk
