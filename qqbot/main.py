@@ -250,7 +250,7 @@ class ChatBot:
                     )
                 self.message_queues[group_id].append(
                     Message(
-                        timestamp=timezone(timedelta(hours=8)),
+                        timestamp=datetime.now(timezone(timedelta(hours=8))),
                         user_id=settings.get("bot_qq_id"),
                         nickname=settings.get("bot_name"),
                         content=[
