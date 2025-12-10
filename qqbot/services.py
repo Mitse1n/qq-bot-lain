@@ -311,7 +311,7 @@ class GeminiService:
             f"这次涉及到的群员有:\n{senders_text}\n"
             f"聊天记录格式是 (发送时间)群员id: 内容\n"
             f"时间格式是 %m-%d %H:%M\n"
-            f"{'你只能看到最近的最多3张图片,看不到视频(之前的照片和视频消息会直接被遗漏, 所以群聊有时候会看起来莫名其妙, 这是正常的).' if settings.get('enable_vision') else '你收不到图片'}\n"
+            f"{'你只能看到最近的最多3张图片,看不到视频(视频消息和之前的照片消息会直接被遗漏, 所以群聊有时候会看起来莫名其妙, 这是正常的).' if settings.get('enable_vision') else '你收不到图片'}\n"
             f"下面是最近的聊天记录\n\n"
         )
         content_parts.append(system_prompt)
@@ -352,7 +352,8 @@ class GeminiService:
 
         content_parts.append(f"给你发送的消息是\n\n")
         append_message(latest_msg)
-        
+        print("get request, latest_msg: ", latest_msg)
+        print('--------------------------------')
         return content_parts
 
 
@@ -428,7 +429,6 @@ class GeminiService:
         recent_messages = list(messages)[-self.max_messages_history:]
         
         content_parts = self._build_chat_parts(recent_messages)
-
         grounding_tool = types.Tool(
             google_search=types.GoogleSearch()
         )
