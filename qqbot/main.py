@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 import aiohttp
+import re
 from pydantic import ValidationError, TypeAdapter
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -176,6 +177,43 @@ class ChatBot:
         finally:
             self.active_group_tasks.remove(group_id)
 
+    def _parse_message_content(self, text: str, group_id: int) -> List[dict]:
+        history = self.message_queues[group_id]
+        known_users = set()
+        for msg in history:
+            known_users.add(str(msg.user_id))
+            
+        segments = []
+        last_end = 0
+        pattern = re.compile(r'@(\d{5,})')
+        
+        for match in pattern.finditer(text):
+            qq_id = match.group(1)
+            start, end = match.span()
+            
+            if qq_id in known_users:
+                if start > last_end:
+                    segments.append({
+                        "type": "text",
+                        "data": {"text": text[last_end:start]}
+                    })
+                segments.append({
+                    "type": "at",
+                    "data": {"qq": qq_id}
+                })
+                last_end = end
+                
+        if last_end < len(text):
+            segments.append({
+                "type": "text",
+                "data": {"text": text[last_end:]}
+            })
+            
+        if not segments:
+             segments.append({"type": "text", "data": {"text": ""}})
+             
+        return segments
+
     async def handle_chat_request(self, group_id: int, reply_id: int, mention_id:int):
         group_state = self.group_states[group_id]
         message_queue = self.message_queues[group_id]
@@ -216,48 +254,49 @@ class ChatBot:
                     )
                     
                     for part in ready_parts:
+                        text_to_parse = " " + part if first_chunk else part
+                        parsed_segments = self._parse_message_content(text_to_parse, group_id)
+                        
                         if first_chunk:
                             await self.chat_service.send_group_message(
-                                group_id, " " + part, reply_id, mention_id
+                                group_id, parsed_segments, reply_id, mention_id
                             )
                             first_chunk = False
                         else:
                             await self.chat_service.send_group_message(
-                                group_id, part
+                                group_id, parsed_segments
                             )
+                        
+                        content_segments = TypeAdapter(List[MessageSegment]).validate_python(parsed_segments)
                         self.message_queues[group_id].append(
                             Message(
                                 timestamp=datetime.now(timezone(timedelta(hours=8))),
-                                user_id=settings.get("bot_qq_id"),
+                                user_id=str(settings.get("bot_qq_id")),
                                 nickname=settings.get("bot_name"),
-                                content=[
-                                    TextMessageSegment(
-                                        type="text",
-                                        data=TextData(text=part),
-                                    )
-                                ],
+                                content=content_segments,
                             )
                         )
 
             if response_buffer:  # 发送剩余的消息
+                text_to_parse = " " + response_buffer if first_chunk else response_buffer
+                parsed_segments = self._parse_message_content(text_to_parse, group_id)
+                
                 if first_chunk:
                     await self.chat_service.send_group_message(
-                        group_id, " " + response_buffer, reply_id, mention_id
+                        group_id, parsed_segments, reply_id, mention_id
                     )
                 else:
                     await self.chat_service.send_group_message(
-                        group_id, response_buffer
+                        group_id, parsed_segments
                     )
+                
+                content_segments = TypeAdapter(List[MessageSegment]).validate_python(parsed_segments)
                 self.message_queues[group_id].append(
                     Message(
                         timestamp=datetime.now(timezone(timedelta(hours=8))),
-                        user_id=settings.get("bot_qq_id"),
+                        user_id=str(settings.get("bot_qq_id")),
                         nickname=settings.get("bot_name"),
-                        content=[
-                            TextMessageSegment(
-                                type="text", data=TextData(text=response_buffer)
-                            )
-                        ],
+                        content=content_segments,
                     )
                 )
 
