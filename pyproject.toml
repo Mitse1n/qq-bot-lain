@@ -14,7 +14,7 @@ requires-python = ">=3.13"
 dependencies = [
     "httpx",
     "pydantic",
-    "google-genai",
+    "google-genai>=1.54.0",
     "python-dotenv",
     "aiohttp",
     "Pillow",
