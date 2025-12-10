@@ -3,7 +3,7 @@ import httpx
 import aiohttp
 from pydantic import ValidationError, TypeAdapter
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from qqbot.config_loader import settings
@@ -132,7 +132,7 @@ class ChatBot:
         )
 
         return Message(
-            timestamp=datetime.fromtimestamp(timestamp),
+            timestamp=datetime.fromtimestamp(timestamp, tz=timezone(timedelta(hours=8))),
             user_id=str(user_id),
             card=str(sender.get("card")),
             nickname=sender.get("nickname"),
@@ -227,7 +227,7 @@ class ChatBot:
                             )
                         self.message_queues[group_id].append(
                             Message(
-                                timestamp=datetime.now(),
+                                timestamp=datetime.now(timezone(timedelta(hours=8))),
                                 user_id=settings.get("bot_qq_id"),
                                 nickname=settings.get("bot_name"),
                                 content=[
@@ -250,7 +250,7 @@ class ChatBot:
                     )
                 self.message_queues[group_id].append(
                     Message(
-                        timestamp=datetime.now(),
+                        timestamp=timezone(timedelta(hours=8)),
                         user_id=settings.get("bot_qq_id"),
                         nickname=settings.get("bot_name"),
                         content=[
@@ -260,6 +260,7 @@ class ChatBot:
                         ],
                     )
                 )
+
 
         except Exception as e:
             if "503" in str(e):
@@ -272,7 +273,7 @@ class ChatBot:
             await self.chat_service.send_group_message(group_id, error_message, reply_id, mention_id)
             self.message_queues[group_id].append(
                 Message(
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone(timedelta(hours=8))),
                     user_id=settings.get('bot_qq_id'),
                     nickname=settings.get('bot_name'),
                     content=[TextMessageSegment(type="text", data=TextData(text=error_message))],
