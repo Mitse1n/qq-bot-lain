@@ -355,7 +355,8 @@ class GeminiService:
 
         content_parts.append(f"给你发送的消息是\n\n")
         append_message(latest_msg)
-        print("get request, latest_msg: ", latest_msg)
+        
+        print("get request, latest_msg: ", latest_msg,"memory_prompt: ", memory_prompt)
         print('--------------------------------')
         return content_parts
 

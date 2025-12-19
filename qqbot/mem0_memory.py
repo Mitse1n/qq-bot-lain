@@ -138,7 +138,7 @@ class Mem0MemoryService:
             llm_model = str(
                 settings.get(
                     "mem0.llm_model",
-                    settings.get("tiny_model_name", "gemini-2.0-flash"),
+                    settings.get("tiny_model_name", "gemini-2.5-flash-lite"),
                 )
             )
             llm_temperature = float(settings.get("mem0.temperature", 0.1))
