@@ -283,7 +283,9 @@ class GeminiService:
         return list(filter(is_image_exists, selected_images))[-max_images:]
 
 
-    def _build_chat_parts(self, messages: List[Message]) -> List[Union[str, types.Part]]:
+    def _build_chat_parts(
+        self, messages: List[Message], *, memory_prompt: Optional[str] = None
+    ) -> List[Union[str, types.Part]]:
         latest_msg = messages[-1]
         other_msgs = messages[:-1]
         
@@ -309,11 +311,12 @@ class GeminiService:
             f"提及群员的时候, 可以用群昵称, 或者模仿群员之间互相称呼的方式, 其次是账号名, 尽量不要提及群员id\n"
             f"最近聊天记录只是参考, 主要是回复给你发送的消息, 你的这次回答不支持表情, 不支持图片,  除非必要, 回复中不要出现群员id.\n"
             f"这次涉及到的群员有:\n{senders_text}\n"
-            f"聊天记录格式是 (发送时间)群员id: 内容\n"
+            f"{memory_prompt or ''}\n"
+            f"给你展示的聊天记录格式是 (发送时间)群员id: 内容\n"
             f"时间格式是 %m-%d %H:%M\n"
-            f"{'你只能看到最近的最多3张图片,看不到视频(视频消息和之前的照片消息会直接被遗漏, 所以群聊有时候会看起来莫名其妙, 这是正常的).' if settings.get('enable_vision') else '你收不到图片'}\n"
-            f"下面是最近的聊天记录\n\n"
+            f"{'你只能看到最近的最多3张图片,看不到视频(视频消息和之前的照片消息会直接被遗漏, 所以群聊有时候会看起来莫名其妙, 这是正常的).' if settings.get('enable_vision') else '你收不到图片'}\n\n"
         )
+        system_prompt += "下面是最近的聊天记录\n\n"
         content_parts.append(system_prompt)
 
         image_dir = self._get_image_dir()
@@ -423,12 +426,14 @@ class GeminiService:
     #                 time.sleep(2)
     #             else:
     #                 raise e
-    async def generate_content_stream(self, messages: Deque[Message]):
+    async def generate_content_stream(
+        self, messages: Deque[Message], *, memory_prompt: Optional[str] = None
+    ):
         if not messages:
             raise Exception("No messages to process.")
         recent_messages = list(messages)[-self.max_messages_history:]
         
-        content_parts = self._build_chat_parts(recent_messages)
+        content_parts = self._build_chat_parts(recent_messages, memory_prompt=memory_prompt)
         grounding_tool = types.Tool(
             google_search=types.GoogleSearch()
         )

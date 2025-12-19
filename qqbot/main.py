@@ -18,6 +18,7 @@ from qqbot.models import (
     TokenBucket,
 )
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
+from qqbot.mem0_memory import Mem0MemoryService
 
 
 def split_message_stream(current_buffer: str, new_chunk: str, min_length: int = 400) -> tuple[list[str], str]:
@@ -81,6 +82,7 @@ class ChatBot:
         self.event_service = EventService()
         self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
+        self.mem0_memory = Mem0MemoryService()
         self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
@@ -150,6 +152,19 @@ class ChatBot:
             return
 
         self.message_queues[event.group_id].append(message)
+        try:
+            text_for_mem, _ = message.get_formatted_text(vision_enabled=False)
+            bot_id = str(settings.get("bot_qq_id"))
+            text_for_mem = re.sub(rf"@{re.escape(bot_id)}\s*", "", text_for_mem).strip()
+            await self.mem0_memory.observe_message(
+                agent_id=str(event.group_id),
+                user_id=str(message.user_id),
+                user_name=(message.card or "").strip() or (message.nickname or "").strip() or None,
+                text=text_for_mem,
+                is_bot=self._is_message_from_bot(message),
+            )
+        except Exception as e:
+            print(f"mem0 observe failed: {e}")
 
         if not self._is_bot_mentioned(event.message):
             return
@@ -244,10 +259,36 @@ class ChatBot:
                 group_state["has_history"] = True
 
         history = self.message_queues[group_id]
+        latest_msg = history[-1] if history else None
+        memory_prompt = None
+        user_text_for_memory = ""
+        speaker_name = None
+        if latest_msg is not None:
+            user_text_for_memory, _ = latest_msg.get_formatted_text(vision_enabled=False)
+            bot_id = str(settings.get("bot_qq_id"))
+            user_text_for_memory = re.sub(
+                rf"@{re.escape(bot_id)}\s*", "", user_text_for_memory
+            ).strip()
+
+            speaker_name = (
+                (latest_msg.card or "").strip()
+                or (latest_msg.nickname or "").strip()
+                or None
+            )
+            if user_text_for_memory:
+                memory_prompt = await self.mem0_memory.build_prompt_block(
+                    query=f"{speaker_name}: {user_text_for_memory}"
+                    if speaker_name
+                    else user_text_for_memory,
+                    user_id=str(mention_id),
+                    agent_id=str(group_id),
+                    speaker_name=speaker_name,
+                )
+
         response_buffer = ""
         first_chunk = True
         try:
-            async for chunk in self.gemini_service.generate_content_stream(history):
+            async for chunk in self.gemini_service.generate_content_stream(history, memory_prompt=memory_prompt):
                 if chunk.text is not None:
                     ready_parts, response_buffer = split_message_stream(
                         response_buffer, chunk.text, min_length=400
@@ -276,6 +317,13 @@ class ChatBot:
                                 content=content_segments,
                             )
                         )
+                        await self.mem0_memory.observe_message(
+                            agent_id=str(group_id),
+                            user_id=str(settings.get("bot_qq_id")),
+                            user_name=str(settings.get("bot_name")),
+                            text=part,
+                            is_bot=True,
+                        )
 
             if response_buffer:  # 发送剩余的消息
                 text_to_parse = " " + response_buffer if first_chunk else response_buffer
@@ -299,7 +347,13 @@ class ChatBot:
                         content=content_segments,
                     )
                 )
-
+                await self.mem0_memory.observe_message(
+                    agent_id=str(group_id),
+                    user_id=str(settings.get("bot_qq_id")),
+                    user_name=str(settings.get("bot_name")),
+                    text=response_buffer,
+                    is_bot=True,
+                )
 
         except Exception as e:
             if "503" in str(e):

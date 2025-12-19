@@ -9,7 +9,7 @@ description = "A Gemini chat application"
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
 ]
-readme = "README.md"
+readme = "Readme.md"
 requires-python = ">=3.13"
 dependencies = [
     "httpx",
@@ -19,6 +19,8 @@ dependencies = [
     "aiohttp",
     "Pillow",
     "dynaconf>=3.2.11",
+    "mem0ai>=1.0.1",
+    "chromadb>=0.4.24",
 ]
 
 [project.optional-dependencies]
