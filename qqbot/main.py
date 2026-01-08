@@ -18,6 +18,7 @@ from qqbot.models import (
     TokenBucket,
 )
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
+from qqbot.agentic_memory import GroupMemoryManager
 
 
 def split_message_stream(current_buffer: str, new_chunk: str, min_length: int = 400) -> tuple[list[str], str]:
@@ -81,6 +82,7 @@ class ChatBot:
         self.event_service = EventService()
         self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
+        self.group_memory = GroupMemoryManager(self.gemini_service)
         self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
@@ -150,6 +152,10 @@ class ChatBot:
             return
 
         self.message_queues[event.group_id].append(message)
+        try:
+            self.group_memory.ingest_message(event.group_id, message)
+        except Exception as e:
+            print(f"agentic_memory ingest error for group {event.group_id}: {e}")
 
         if not self._is_bot_mentioned(event.message):
             return
@@ -247,7 +253,17 @@ class ChatBot:
         response_buffer = ""
         first_chunk = True
         try:
-            async for chunk in self.gemini_service.generate_content_stream(history):
+            memory_prompt = None
+            try:
+                memory_prompt = await self.group_memory.build_memory_prompt(
+                    group_id, history, mention_user_id=str(mention_id)
+                )
+            except Exception as e:
+                print(f"agentic_memory retrieval error for group {group_id}: {e}")
+
+            async for chunk in self.gemini_service.generate_content_stream(
+                history, memory_prompt=memory_prompt
+            ):
                 if chunk.text is not None:
                     ready_parts, response_buffer = split_message_stream(
                         response_buffer, chunk.text, min_length=400
@@ -321,6 +337,7 @@ class ChatBot:
 
     async def close(self):
         await self.image_service.stop_cleanup_task()
+        await self.group_memory.close()
         await self.http_client.aclose()
         await self.aiohttp_session.close()
 
