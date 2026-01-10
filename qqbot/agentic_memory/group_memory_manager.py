@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, Literal, Optional, Sequence, Tuple
 
 import chromadb
+from pydantic import BaseModel, Field
 
 from qqbot.config_loader import settings
 from qqbot.models import AtMessageSegment, Message
@@ -111,6 +112,39 @@ class GroupMemoryNote:
     created_at: str
     updated_at: str
     expire_at: Optional[str] = None
+
+
+class MemoryUpsert(BaseModel):
+    type: Literal[
+        "group_profile", "user_profile", "decision", "task", "resource", "topic_summary"
+    ] = Field(description="The category of the memory note.")
+    note_key: str = Field(description="A stable, unique key for the note within this group.")
+    subject_user_ids: List[str] = Field(
+        default_factory=list, description="User IDs this memory is primarily about."
+    )
+    summary: str = Field(description="Concise summary, max 400 chars.")
+    details: List[str] = Field(
+        default_factory=list, description="Supporting bullet points or details."
+    )
+    tags: List[str] = Field(default_factory=list, description="Short keywords for indexing.")
+    importance: int = Field(ge=1, le=5, description="Priority level from 1 to 5.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Model confidence in this extraction.")
+    ttl_days: Optional[int] = Field(
+        default=None, description="Days until this memory expires, if applicable."
+    )
+    evidence_indices: List[int] = Field(
+        default_factory=list, description="Indices of messages in UPDATE section as evidence."
+    )
+
+
+class MemoryPatch(BaseModel):
+    batch_summary: str = Field(description="A very brief overview of what changed in this batch.")
+    upserts: List[MemoryUpsert] = Field(
+        default_factory=list, description="List of notes to create or update."
+    )
+    deletes: List[str] = Field(
+        default_factory=list, description="List of note_keys to remove if no longer valid."
+    )
 
 
 class SQLiteNoteStore:
@@ -423,9 +457,6 @@ class GroupMemoryManager:
 
         self._states: Dict[str, _GroupBufferState] = {}
         self._group_locks: Dict[str, asyncio.Lock] = {}
-        self._background_sem = asyncio.Semaphore(
-            int(settings.get("agentic_memory.background_concurrency", 1))
-        )
 
         self._user_name_cache: Dict[Tuple[str, str], str] = {}
 
@@ -638,37 +669,32 @@ class GroupMemoryManager:
                 state.flush_task = asyncio.create_task(self._flush_loop(group_id))
 
     async def _flush_loop(self, group_id: str) -> None:
-        async with self._background_sem:
-            lock = self._group_locks.get(group_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._group_locks[group_id] = lock
-
-            async with lock:
-                state = self._states.get(group_id)
-                if state is None:
+        lock = self._group_locks.get(group_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._group_locks[group_id] = lock
+        async with lock:
+            state = self._states.get(group_id)
+            if state is None:
+                return
+            while len(state.pending_messages) >= self._flush_every:
+                ref = list(state.ref_messages)[-self._ref_count:]
+                update = list(state.pending_messages)[: self._flush_every]
+                if not update:
                     return
-                while len(state.pending_messages) >= self._flush_every:
-                    ref = list(state.ref_messages)[-self._ref_count:]
-                    update = list(state.pending_messages)[: self._flush_every]
-                    if not update:
-                        return
-
-                    try:
-                        await self._run_one_flush(group_id, ref, update)
-                    except Exception:
-                        logger.exception("agentic_memory: flush failed (group_id=%s)", group_id)
-                        return
-
-                    for _ in range(self._flush_every):
-                        if state.pending_messages:
-                            state.pending_messages.popleft()
-                        else:
-                            break
-
-                    window = ref + update
-                    state.ref_messages.clear()
-                    state.ref_messages.extend(window[-self._ref_count :])
+                try:
+                    await self._run_one_flush(group_id, ref, update)
+                except Exception:
+                    logger.exception("agentic_memory: flush failed (group_id=%s)", group_id)
+                    return
+                for _ in range(self._flush_every):
+                    if state.pending_messages:
+                        state.pending_messages.popleft()
+                    else:
+                        break
+                window = ref + update
+                state.ref_messages.clear()
+                state.ref_messages.extend(window[-self._ref_count :])
 
     async def _run_one_flush(
         self, group_id: str, ref_msgs: Sequence[BufferedMessage], update_msgs: Sequence[BufferedMessage]
@@ -750,14 +776,12 @@ class GroupMemoryManager:
         system_instruction = (
             "你是群聊长期记忆管理器。你的任务是从 UPDATE 区消息中提取高价值长期记忆，并输出可执行的 JSON 变更集。\n"
             "硬性规则：\n"
-            "1) REFERENCE 区仅用于理解上下文，禁止从 REFERENCE 提取/更新任何事实或记忆；证据也禁止引用 REFERENCE。\n"
-            f"2) 只有 UPDATE 区允许写入；所有 evidence_indices 必须来自 UPDATE（范围 1..{update_count}）。\n"
-            "3) 只记录长期可复用/可验证/可行动的信息；不确定就不记（宁缺毋滥）。\n"
-            f"4) 每条 note 必须原子化，按语义实体/事件聚合；禁止把 {update_count} 条消息合成一个 note；summary 以概括为主。\n"
-            "5) 与人相关信息必须绑定 user_id；昵称只是展示，可变。\n"
-            "6) 记忆仅对当前 group_id 生效，不得跨群泛化。\n"
-            "7) summary/details/tags 中不要出现 user_id/uid 等内部标识；身份用 subject_user_ids 与 note_key 表达。\n"
-            "输出必须为严格 JSON，不要使用 Markdown 代码块。\n"
+            f"1. REFERENCE 区仅用于理解上下文，禁止从 REFERENCE 提取/更新任何事实或记忆；证据也禁止引用 REFERENCE。\n"
+            f"2. 只有 UPDATE 区允许写入；所有 evidence_indices 必须来自 UPDATE（范围 1..{update_count}）。\n"
+            f"3. 只记录长期可复用/可验证/可行动的信息；不确定就不记（宁缺毋滥）。\n"
+            f"4. 每条 note 必须原子化，按语义实体/事件聚合；禁止把所有条消息合成一个 note；summary 以概括为主。\n"
+            f"5. 与人相关信息必须绑定 user_id；昵称只是展示，可变。\n"
+            f"6. summary/details/tags 中不要出现 user_id/uid 等内部标识；身份用 subject_user_ids 与 note_key 表达。\n"
         )
 
         prompt = (
@@ -772,25 +796,7 @@ class GroupMemoryManager:
             + "\n\n[UPDATE]\n"
             + "\n".join(upd_lines)
             + "\n\n"
-            "Return JSON with schema:\n"
-            "{\n"
-            '  "batch_summary": "one short sentence",\n'
-            '  "upserts": [\n'
-            "    {\n"
-            '      "type": "group_profile|user_profile|decision|task|resource|topic_summary",\n'
-            '      "note_key": "stable key within this group",\n'
-            '      "subject_user_ids": ["..."],\n'
-            '      "summary": "<=400 chars, summary-first",\n'
-            '      "details": ["short bullet", "..."],\n'
-            '      "tags": ["keyword", "..."],\n'
-            '      "importance": 1,\n'
-            '      "confidence": 0.0,\n'
-            '      "ttl_days": 7,\n'
-            '      "evidence_indices": [1, 2]\n'
-            "    }\n"
-            "  ],\n"
-            '  "deletes": ["note_key"]\n'
-            "}\n"
+            "Extract memories from the [UPDATE] section and return them in the specified JSON structure.\n"
             "Constraints:\n"
             f"- evidence_indices must be from UPDATE only (1..{update_count}).\n"
             "- For type=group_profile, note_key MUST be 'group_profile'.\n"
@@ -804,6 +810,7 @@ class GroupMemoryManager:
                 prompt,
                 model_name=self._batch_llm_model,
                 system_instruction=system_instruction,
+                response_schema=MemoryPatch,
                 max_output_tokens=2048,
                 temperature=0.1,
             )

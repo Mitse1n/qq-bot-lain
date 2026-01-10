@@ -523,6 +523,7 @@ class GeminiService:
         *,
         model_name: Optional[str] = None,
         system_instruction: Optional[str] = None,
+        response_schema: Optional[Any] = None,
         max_output_tokens: int = 2048,
         temperature: float = 0.1,
     ) -> Any:
@@ -532,9 +533,15 @@ class GeminiService:
         keys_tried = 0
         max_key_rotations = len(self.api_keys)
 
+        # Handle Pydantic models for structured output
+        schema = response_schema
+        if response_schema and hasattr(response_schema, "model_json_schema"):
+            schema = response_schema.model_json_schema()
+
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             response_mime_type="application/json",
+            response_json_schema=schema,
             max_output_tokens=max_output_tokens,
             temperature=temperature,
         )
