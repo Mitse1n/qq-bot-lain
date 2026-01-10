@@ -497,26 +497,6 @@ class GeminiService:
                 else:
                     raise e
 
-    def _extract_json_from_text(self, text: str) -> Any:
-        text = (text or "").strip()
-        if not text:
-            raise ValueError("Empty response text")
-        # Strip Markdown code fences if present.
-        if text.startswith("```"):
-            text = re.sub(r"^```[a-zA-Z0-9_+-]*\\s*", "", text)
-            text = re.sub(r"```\\s*$", "", text).strip()
-        # Fast path
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-        # Try to extract the first top-level JSON object.
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(text[start : end + 1])
-        raise ValueError("Could not parse JSON from model output")
-
     async def generate_json(
         self,
         prompt: str,
@@ -553,7 +533,8 @@ class GeminiService:
                     contents=prompt,
                     config=config,
                 )
-                return self._extract_json_from_text(getattr(resp, "text", ""))
+                print("structed request: ", prompt, "response: ", resp.text)
+                return resp.text
             except Exception as e:
                 if "429" in str(e) and keys_tried < max_key_rotations:
                     self._rotate_api_key()
