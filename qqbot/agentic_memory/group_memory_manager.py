@@ -89,10 +89,7 @@ class BufferedMessage:
 
 @dataclass
 class _GroupBufferState:
-    ref_messages: Deque[BufferedMessage]
-    pending_messages: Deque[BufferedMessage]
-    recent_signatures: Deque[str]
-    signature_set: set[str]
+    """Lightweight state tracking per group (pending data is in SQLite)."""
     flush_task: Optional[asyncio.Task] = None
 
 
@@ -197,6 +194,37 @@ class SQLiteNoteStore:
                   display_name TEXT NOT NULL,
                   last_seen_at TEXT NOT NULL,
                   PRIMARY KEY (group_id, user_id)
+                );
+                """
+            )
+            # Table for pending messages that haven't been flushed yet
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  group_id TEXT NOT NULL,
+                  timestamp TEXT NOT NULL,
+                  user_id TEXT NOT NULL,
+                  display_name TEXT NOT NULL,
+                  text TEXT NOT NULL,
+                  signature TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_group ON pending_messages(group_id);"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_signature ON pending_messages(group_id, signature);"
+            )
+            # Table for tracking last flushed message per group
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_flush_cursor (
+                  group_id TEXT PRIMARY KEY,
+                  last_flushed_id INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -356,6 +384,128 @@ class SQLiteNoteStore:
             updated_at=str(row["updated_at"]),
             expire_at=str(row["expire_at"]) if row["expire_at"] else None,
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Pending messages persistence
+    # ─────────────────────────────────────────────────────────────────────
+
+    def signature_exists(self, group_id: str, signature: str) -> bool:
+        """Check if a message signature already exists for this group."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM pending_messages WHERE group_id=? AND signature=? LIMIT 1;",
+                (group_id, signature),
+            ).fetchone()
+        return row is not None
+
+    def insert_pending_message(
+        self,
+        group_id: str,
+        timestamp: datetime,
+        user_id: str,
+        display_name: str,
+        text: str,
+        signature: str,
+    ) -> Optional[int]:
+        """Insert a pending message and return its id."""
+        now = _iso(_utc_now())
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_messages(group_id, timestamp, user_id, display_name, text, signature, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (group_id, _iso(timestamp), user_id, display_name, text, signature, now),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def get_pending_messages_after(
+        self, group_id: str, after_id: int, limit: int
+    ) -> List[Tuple[int, "BufferedMessage"]]:
+        """Get pending messages after a given id, returns list of (id, BufferedMessage)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, timestamp, user_id, display_name, text
+                FROM pending_messages
+                WHERE group_id=? AND id > ?
+                ORDER BY id ASC
+                LIMIT ?;
+                """,
+                (group_id, after_id, limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            ts = _parse_iso(row["timestamp"]) or _utc_now()
+            msg = BufferedMessage(
+                timestamp=ts,
+                user_id=str(row["user_id"]),
+                display_name=str(row["display_name"]),
+                text=str(row["text"]),
+            )
+            result.append((int(row["id"]), msg))
+        return result
+
+    def count_pending_messages_after(self, group_id: str, after_id: int) -> int:
+        """Count pending messages after a given id."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) as cnt FROM pending_messages WHERE group_id=? AND id > ?;",
+                (group_id, after_id),
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_flush_cursor(self, group_id: str) -> int:
+        """Get the last flushed message id for a group, returns 0 if not set."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_flushed_id FROM group_flush_cursor WHERE group_id=?;",
+                (group_id,),
+            ).fetchone()
+        return int(row["last_flushed_id"]) if row else 0
+
+    def update_flush_cursor(self, group_id: str, last_flushed_id: int) -> None:
+        """Update the flush cursor for a group."""
+        now = _iso(_utc_now())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO group_flush_cursor(group_id, last_flushed_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                  last_flushed_id=excluded.last_flushed_id,
+                  updated_at=excluded.updated_at;
+                """,
+                (group_id, last_flushed_id, now),
+            )
+            self._conn.commit()
+
+    def cleanup_old_pending_messages(self, group_id: str, up_to_id: int) -> int:
+        """Delete pending messages up to and including the given id. Returns deleted count."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM pending_messages WHERE group_id=? AND id <= ?;",
+                (group_id, up_to_id),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def get_groups_with_pending(self, min_pending: int) -> List[Tuple[str, int]]:
+        """Get groups that have at least min_pending messages after their cursor."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT pm.group_id, COUNT(*) as cnt
+                FROM pending_messages pm
+                LEFT JOIN group_flush_cursor gfc ON pm.group_id = gfc.group_id
+                WHERE pm.id > COALESCE(gfc.last_flushed_id, 0)
+                GROUP BY pm.group_id
+                HAVING cnt >= ?;
+                """,
+                (min_pending,),
+            ).fetchall()
+        return [(str(row["group_id"]), int(row["cnt"])) for row in rows]
 
 
 class ChromaIndex:
@@ -638,12 +788,7 @@ class GroupMemoryManager:
     def _get_state(self, group_id: str) -> _GroupBufferState:
         state = self._states.get(group_id)
         if state is None:
-            state = _GroupBufferState(
-                ref_messages=deque(maxlen=self._ref_count),
-                pending_messages=deque(),
-                recent_signatures=deque(),
-                signature_set=set(),
-            )
+            state = _GroupBufferState()
             self._states[group_id] = state
         return state
 
@@ -651,20 +796,28 @@ class GroupMemoryManager:
         state = self._get_state(group_id)
 
         sig = msg.signature()
-        if sig in state.signature_set:
+        # Check for duplicate via database
+        if self._store.signature_exists(group_id, sig):
             return
-        if len(state.recent_signatures) >= self._dedup_max:
-            old = state.recent_signatures.popleft()
-            state.signature_set.discard(old)
-        state.recent_signatures.append(sig)
-        state.signature_set.add(sig)
 
-        state.pending_messages.append(msg)
-        while len(state.pending_messages) > self._max_buffer:
-            dropped = state.pending_messages.popleft()
-            state.signature_set.discard(dropped.signature())
+        # Persist message to database
+        try:
+            self._store.insert_pending_message(
+                group_id=group_id,
+                timestamp=msg.timestamp,
+                user_id=msg.user_id,
+                display_name=msg.display_name,
+                text=msg.text,
+                signature=sig,
+            )
+        except Exception:
+            logger.exception("agentic_memory: failed to persist pending message")
+            return
 
-        if len(state.pending_messages) >= self._flush_every:
+        # Check if we should trigger a flush
+        cursor = self._store.get_flush_cursor(group_id)
+        pending_count = self._store.count_pending_messages_after(group_id, cursor)
+        if pending_count >= self._flush_every:
             if state.flush_task is None or state.flush_task.done():
                 state.flush_task = asyncio.create_task(self._flush_loop(group_id))
 
