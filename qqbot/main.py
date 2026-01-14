@@ -254,6 +254,8 @@ class ChatBot:
                     )
                     
                     for part in ready_parts:
+                        part = delete_qq_prefix(part)
+                        part = convert_md_2_pure_text(part)
                         text_to_parse = " " + part if first_chunk else part
                         parsed_segments = self._parse_message_content(text_to_parse, group_id)
                         
