@@ -278,9 +278,11 @@ class ChatBot:
                         )
 
             if response_buffer:  # 发送剩余的消息
-                text_to_parse = " " + response_buffer if first_chunk else response_buffer
-                parsed_segments = self._parse_message_content(text_to_parse, group_id)
-                
+                # 在解析成消息段之前处理原始文本
+                response_buffer = delete_qq_prefix(response_buffer)
+                response_buffer = convert_md_2_pure_text(response_buffer)
+                response_buffer = " " + response_buffer if first_chunk else response_buffer
+                parsed_segments = self._parse_message_content(response_buffer, group_id)
                 if first_chunk:
                     await self.chat_service.send_group_message(
                         group_id, parsed_segments, reply_id, mention_id
@@ -332,7 +334,33 @@ async def main():
     finally:
         await bot.close()
 
+import re
 
+
+def convert_md_2_pure_text(md: str) -> str:
+    text = md
+
+    # ---------- 去掉强调 ----------
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text)
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+
+    # ---------- 去掉标题 ----------
+    text = re.sub(r"^\s{0,3}#{1,6}\s+", "", text, flags=re.MULTILINE)
+
+    # ---------- 去掉引用 ----------
+    text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)
+
+    # ---------- 去掉无序列表符号 ----------
+    # - item, * item, + item
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+
+
+    # ---------- 去掉水平线 ----------
+    text = re.sub(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$", "", text, flags=re.MULTILINE)
+
+    return text.strip()
+def delete_qq_prefix(text: str) -> str:
+    return re.sub(r'^@\d+', '', text)
 if __name__ == "__main__":
     print("Lain Bot is staring...")
     asyncio.run(main())
