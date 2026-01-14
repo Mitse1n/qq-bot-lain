@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sqlite3
 import threading
 import uuid
 from collections import deque
@@ -15,6 +14,19 @@ from typing import Deque, Dict, List, Literal, Optional, Sequence, Tuple
 
 import chromadb
 from pydantic import BaseModel, Field
+from sqlalchemy import (
+    Column,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+    select,
+    delete as sa_delete,
+)
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from qqbot.config_loader import settings
 from qqbot.models import AtMessageSegment, Message
@@ -75,16 +87,81 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SQLAlchemy ORM Models
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class NoteModel(Base):
+    __tablename__ = "notes"
+
+    note_id = Column(String, primary_key=True)
+    group_id = Column(String, nullable=False, index=True)
+    note_key = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    subject_user_ids = Column(Text, nullable=False)  # JSON
+    summary = Column(Text, nullable=False)
+    details = Column(Text, nullable=False)  # JSON
+    tags = Column(Text, nullable=False)  # JSON
+    importance = Column(Integer, nullable=False)
+    confidence = Column(Float, nullable=False)
+    evidence = Column(Text, nullable=False)  # JSON
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)
+    expire_at = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_notes_group_type", "group_id", "type"),
+        Index("idx_notes_group_expire", "group_id", "expire_at"),
+        Index("uq_notes_group_key", "group_id", "note_key", unique=True),
+    )
+
+
+class UserDirectoryModel(Base):
+    __tablename__ = "user_directory"
+
+    group_id = Column(String, primary_key=True)
+    user_id = Column(String, primary_key=True)
+    display_name = Column(String, nullable=False)
+    last_seen_at = Column(String, nullable=False)
+
+
+class PendingMessageModel(Base):
+    __tablename__ = "pending_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(String, nullable=False, index=True)
+    real_seq = Column(String, nullable=False)
+    timestamp = Column(String, nullable=False)
+    user_id = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    text = Column(Text, nullable=False)
+    created_at = Column(String, nullable=False)
+
+    __table_args__ = (
+        Index("uq_pending_group_seq", "group_id", "real_seq", unique=True),
+    )
+
+
+class GroupFlushCursorModel(Base):
+    __tablename__ = "group_flush_cursor"
+
+    group_id = Column(String, primary_key=True)
+    last_flushed_id = Column(Integer, nullable=False, default=0)
+    updated_at = Column(String, nullable=False)
+
+
 @dataclass(frozen=True)
 class BufferedMessage:
     timestamp: datetime
     user_id: str
     display_name: str
     text: str
-
-    def signature(self) -> str:
-        # Seconds resolution is enough for de-duping history replays.
-        return f"{int(self.timestamp.timestamp())}:{self.user_id}:{self.text}"
+    real_seq: str  # Unique, auto-incrementing sequence number within a group
 
 
 @dataclass
@@ -145,138 +222,88 @@ class MemoryPatch(BaseModel):
 
 
 class SQLiteNoteStore:
+    """SQLAlchemy-based note storage with thread-safe operations."""
+
     def __init__(self, sqlite_path: Path):
         sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._engine = create_engine(
+            f"sqlite:///{sqlite_path}",
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
+        self._SessionLocal = sessionmaker(bind=self._engine, expire_on_commit=False)
         self._lock = threading.Lock()
         self._init_schema()
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            self._engine.dispose()
 
     def _init_schema(self) -> None:
         with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notes (
-                  note_id TEXT PRIMARY KEY,
-                  group_id TEXT NOT NULL,
-                  note_key TEXT NOT NULL,
-                  type TEXT NOT NULL,
-                  subject_user_ids TEXT NOT NULL,
-                  summary TEXT NOT NULL,
-                  details TEXT NOT NULL,
-                  tags TEXT NOT NULL,
-                  importance INTEGER NOT NULL,
-                  confidence REAL NOT NULL,
-                  evidence TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  expire_at TEXT,
-                  UNIQUE (group_id, note_key)
-                );
-                """
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_notes_group_type ON notes(group_id, type);"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_notes_group_expire ON notes(group_id, expire_at);"
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_directory (
-                  group_id TEXT NOT NULL,
-                  user_id TEXT NOT NULL,
-                  display_name TEXT NOT NULL,
-                  last_seen_at TEXT NOT NULL,
-                  PRIMARY KEY (group_id, user_id)
-                );
-                """
-            )
-            # Table for pending messages that haven't been flushed yet
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pending_messages (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  group_id TEXT NOT NULL,
-                  timestamp TEXT NOT NULL,
-                  user_id TEXT NOT NULL,
-                  display_name TEXT NOT NULL,
-                  text TEXT NOT NULL,
-                  signature TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-                """
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_pending_group ON pending_messages(group_id);"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS idx_pending_signature ON pending_messages(group_id, signature);"
-            )
-            # Table for tracking last flushed message per group
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS group_flush_cursor (
-                  group_id TEXT PRIMARY KEY,
-                  last_flushed_id INTEGER NOT NULL DEFAULT 0,
-                  updated_at TEXT NOT NULL
-                );
-                """
-            )
-            self._conn.commit()
+            Base.metadata.create_all(self._engine)
+
+    def _get_session(self) -> Session:
+        return self._SessionLocal()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # User directory operations
+    # ─────────────────────────────────────────────────────────────────────
 
     def upsert_user_display_name(self, group_id: str, user_id: str, display_name: str) -> None:
         now = _iso(_utc_now())
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO user_directory(group_id, user_id, display_name, last_seen_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(group_id, user_id) DO UPDATE SET
-                  display_name=excluded.display_name,
-                  last_seen_at=excluded.last_seen_at;
-                """,
-                (group_id, user_id, display_name, now),
-            )
-            self._conn.commit()
+            with self._get_session() as session:
+                existing = session.get(UserDirectoryModel, (group_id, user_id))
+                if existing:
+                    existing.display_name = display_name
+                    existing.last_seen_at = now
+                else:
+                    session.add(UserDirectoryModel(
+                        group_id=group_id,
+                        user_id=user_id,
+                        display_name=display_name,
+                        last_seen_at=now,
+                    ))
+                session.commit()
 
     def get_user_display_names(self, group_id: str, user_ids: Sequence[str]) -> Dict[str, str]:
         if not user_ids:
             return {}
-        placeholders = ",".join("?" for _ in user_ids)
         with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT user_id, display_name FROM user_directory
-                WHERE group_id=? AND user_id IN ({placeholders});
-                """,
-                (group_id, *user_ids),
-            ).fetchall()
-        return {str(r["user_id"]): str(r["display_name"]) for r in rows}
+            with self._get_session() as session:
+                stmt = select(UserDirectoryModel).where(
+                    UserDirectoryModel.group_id == group_id,
+                    UserDirectoryModel.user_id.in_(user_ids),
+                )
+                rows = session.execute(stmt).scalars().all()
+                return {r.user_id: r.display_name for r in rows}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Note operations
+    # ─────────────────────────────────────────────────────────────────────
 
     def get_note_by_key(self, group_id: str, note_key: str) -> Optional[GroupMemoryNote]:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM notes WHERE group_id=? AND note_key=?;",
-                (group_id, note_key),
-            ).fetchone()
-        return self._row_to_note(row) if row else None
+            with self._get_session() as session:
+                stmt = select(NoteModel).where(
+                    NoteModel.group_id == group_id,
+                    NoteModel.note_key == note_key,
+                )
+                row = session.execute(stmt).scalar_one_or_none()
+                return self._model_to_note(row) if row else None
 
     def get_notes_by_ids(self, group_id: str, note_ids: Sequence[str]) -> List[GroupMemoryNote]:
         if not note_ids:
             return []
-        placeholders = ",".join("?" for _ in note_ids)
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT * FROM notes WHERE group_id=? AND note_id IN ({placeholders});",
-                (group_id, *note_ids),
-            ).fetchall()
-        return [self._row_to_note(r) for r in rows]
+            with self._get_session() as session:
+                stmt = select(NoteModel).where(
+                    NoteModel.group_id == group_id,
+                    NoteModel.note_id.in_(note_ids),
+                )
+                rows = session.execute(stmt).scalars().all()
+                return [self._model_to_note(r) for r in rows]
 
     def list_notes(
         self,
@@ -287,225 +314,292 @@ class SQLiteNoteStore:
         include_expired: bool = False,
         limit: Optional[int] = None,
     ) -> List[GroupMemoryNote]:
-        clauses = ["group_id=? AND importance>=?"]
-        params: list[object] = [group_id, int(min_importance)]
-        if types:
-            placeholders = ",".join("?" for _ in types)
-            clauses.append(f"type IN ({placeholders})")
-            params.extend(types)
-        if not include_expired:
-            now = _iso(_utc_now())
-            clauses.append("(expire_at IS NULL OR expire_at > ?)")
-            params.append(now)
-        sql = f"SELECT * FROM notes WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(int(limit))
         with self._lock:
-            rows = self._conn.execute(sql + ";", tuple(params)).fetchall()
-        return [self._row_to_note(r) for r in rows]
+            with self._get_session() as session:
+                stmt = select(NoteModel).where(
+                    NoteModel.group_id == group_id,
+                    NoteModel.importance >= min_importance,
+                )
+                if types:
+                    stmt = stmt.where(NoteModel.type.in_(types))
+                if not include_expired:
+                    now = _iso(_utc_now())
+                    stmt = stmt.where(
+                        (NoteModel.expire_at.is_(None)) | (NoteModel.expire_at > now)
+                    )
+                stmt = stmt.order_by(NoteModel.updated_at.desc())
+                if limit is not None:
+                    stmt = stmt.limit(limit)
+                rows = session.execute(stmt).scalars().all()
+                return [self._model_to_note(r) for r in rows]
 
     def upsert_notes(self, notes: Sequence[GroupMemoryNote]) -> None:
         if not notes:
             return
         with self._lock:
-            cur = self._conn.cursor()
-            cur.executemany(
-                """
-                INSERT INTO notes(
-                  note_id, group_id, note_key, type, subject_user_ids, summary, details, tags,
-                  importance, confidence, evidence, created_at, updated_at, expire_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(group_id, note_key) DO UPDATE SET
-                  type=excluded.type,
-                  subject_user_ids=excluded.subject_user_ids,
-                  summary=excluded.summary,
-                  details=excluded.details,
-                  tags=excluded.tags,
-                  importance=excluded.importance,
-                  confidence=excluded.confidence,
-                  evidence=excluded.evidence,
-                  updated_at=excluded.updated_at,
-                  expire_at=excluded.expire_at;
-                """,
-                [
-                    (
-                        n.note_id,
-                        n.group_id,
-                        n.note_key,
-                        n.type,
-                        json.dumps(n.subject_user_ids, ensure_ascii=False),
-                        n.summary,
-                        json.dumps(n.details, ensure_ascii=False),
-                        json.dumps(n.tags, ensure_ascii=False),
-                        int(n.importance),
-                        float(n.confidence),
-                        json.dumps(n.evidence, ensure_ascii=False),
-                        n.created_at,
-                        n.updated_at,
-                        n.expire_at,
-                    )
-                    for n in notes
-                ],
-            )
-            self._conn.commit()
+            with self._get_session() as session:
+                for n in notes:
+                    existing = session.execute(
+                        select(NoteModel).where(
+                            NoteModel.group_id == n.group_id,
+                            NoteModel.note_key == n.note_key,
+                        )
+                    ).scalar_one_or_none()
+                    if existing:
+                        existing.type = n.type
+                        existing.subject_user_ids = json.dumps(n.subject_user_ids, ensure_ascii=False)
+                        existing.summary = n.summary
+                        existing.details = json.dumps(n.details, ensure_ascii=False)
+                        existing.tags = json.dumps(n.tags, ensure_ascii=False)
+                        existing.importance = n.importance
+                        existing.confidence = n.confidence
+                        existing.evidence = json.dumps(n.evidence, ensure_ascii=False)
+                        existing.updated_at = n.updated_at
+                        existing.expire_at = n.expire_at
+                    else:
+                        session.add(NoteModel(
+                            note_id=n.note_id,
+                            group_id=n.group_id,
+                            note_key=n.note_key,
+                            type=n.type,
+                            subject_user_ids=json.dumps(n.subject_user_ids, ensure_ascii=False),
+                            summary=n.summary,
+                            details=json.dumps(n.details, ensure_ascii=False),
+                            tags=json.dumps(n.tags, ensure_ascii=False),
+                            importance=n.importance,
+                            confidence=n.confidence,
+                            evidence=json.dumps(n.evidence, ensure_ascii=False),
+                            created_at=n.created_at,
+                            updated_at=n.updated_at,
+                            expire_at=n.expire_at,
+                        ))
+                session.commit()
 
     def delete_by_keys(self, group_id: str, note_keys: Sequence[str]) -> List[str]:
         if not note_keys:
             return []
-        placeholders = ",".join("?" for _ in note_keys)
         with self._lock:
-            rows = self._conn.execute(
-                f"SELECT note_id, note_key FROM notes WHERE group_id=? AND note_key IN ({placeholders});",
-                (group_id, *note_keys),
-            ).fetchall()
-            self._conn.execute(
-                f"DELETE FROM notes WHERE group_id=? AND note_key IN ({placeholders});",
-                (group_id, *note_keys),
-            )
-            self._conn.commit()
-        return [str(r["note_id"]) for r in rows]
+            with self._get_session() as session:
+                stmt = select(NoteModel.note_id).where(
+                    NoteModel.group_id == group_id,
+                    NoteModel.note_key.in_(note_keys),
+                )
+                note_ids = [str(r) for r in session.execute(stmt).scalars().all()]
 
-    def _row_to_note(self, row: sqlite3.Row) -> GroupMemoryNote:
+                session.execute(
+                    sa_delete(NoteModel).where(
+                        NoteModel.group_id == group_id,
+                        NoteModel.note_key.in_(note_keys),
+                    )
+                )
+                session.commit()
+                return note_ids
+
+    def _model_to_note(self, model: NoteModel) -> GroupMemoryNote:
         return GroupMemoryNote(
-            note_id=str(row["note_id"]),
-            group_id=str(row["group_id"]),
-            note_key=str(row["note_key"]),
-            type=str(row["type"]),
-            subject_user_ids=list(json.loads(row["subject_user_ids"])),
-            summary=str(row["summary"]),
-            details=list(json.loads(row["details"])),
-            tags=list(json.loads(row["tags"])),
-            importance=int(row["importance"]),
-            confidence=float(row["confidence"]),
-            evidence=list(json.loads(row["evidence"])),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
-            expire_at=str(row["expire_at"]) if row["expire_at"] else None,
+            note_id=str(model.note_id),
+            group_id=str(model.group_id),
+            note_key=str(model.note_key),
+            type=str(model.type),
+            subject_user_ids=list(json.loads(model.subject_user_ids)),
+            summary=str(model.summary),
+            details=list(json.loads(model.details)),
+            tags=list(json.loads(model.tags)),
+            importance=int(model.importance),
+            confidence=float(model.confidence),
+            evidence=list(json.loads(model.evidence)),
+            created_at=str(model.created_at),
+            updated_at=str(model.updated_at),
+            expire_at=str(model.expire_at) if model.expire_at else None,
         )
 
     # ─────────────────────────────────────────────────────────────────────
     # Pending messages persistence
     # ─────────────────────────────────────────────────────────────────────
 
-    def signature_exists(self, group_id: str, signature: str) -> bool:
-        """Check if a message signature already exists for this group."""
+    def real_seq_exists(self, group_id: str, real_seq: str) -> bool:
+        """Check if a message with this real_seq already exists for this group."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM pending_messages WHERE group_id=? AND signature=? LIMIT 1;",
-                (group_id, signature),
-            ).fetchone()
-        return row is not None
+            with self._get_session() as session:
+                stmt = select(PendingMessageModel.id).where(
+                    PendingMessageModel.group_id == group_id,
+                    PendingMessageModel.real_seq == real_seq,
+                ).limit(1)
+                return session.execute(stmt).scalar_one_or_none() is not None
 
     def insert_pending_message(
         self,
         group_id: str,
+        real_seq: str,
         timestamp: datetime,
         user_id: str,
         display_name: str,
         text: str,
-        signature: str,
     ) -> Optional[int]:
-        """Insert a pending message and return its id."""
+        """Insert a pending message and return its id. Returns None if real_seq already exists."""
         now = _iso(_utc_now())
         with self._lock:
-            cur = self._conn.execute(
-                """
-                INSERT INTO pending_messages(group_id, timestamp, user_id, display_name, text, signature, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
-                """,
-                (group_id, _iso(timestamp), user_id, display_name, text, signature, now),
-            )
-            self._conn.commit()
-            return cur.lastrowid
+            with self._get_session() as session:
+                # Check for existing
+                existing = session.execute(
+                    select(PendingMessageModel.id).where(
+                        PendingMessageModel.group_id == group_id,
+                        PendingMessageModel.real_seq == real_seq,
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return None
+
+                msg = PendingMessageModel(
+                    group_id=group_id,
+                    real_seq=real_seq,
+                    timestamp=_iso(timestamp),
+                    user_id=user_id,
+                    display_name=display_name,
+                    text=text,
+                    created_at=now,
+                )
+                session.add(msg)
+                session.commit()
+                return msg.id
 
     def get_pending_messages_after(
         self, group_id: str, after_id: int, limit: int
     ) -> List[Tuple[int, "BufferedMessage"]]:
         """Get pending messages after a given id, returns list of (id, BufferedMessage)."""
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT id, timestamp, user_id, display_name, text
-                FROM pending_messages
-                WHERE group_id=? AND id > ?
-                ORDER BY id ASC
-                LIMIT ?;
-                """,
-                (group_id, after_id, limit),
-            ).fetchall()
-        result = []
-        for row in rows:
-            ts = _parse_iso(row["timestamp"]) or _utc_now()
-            msg = BufferedMessage(
-                timestamp=ts,
-                user_id=str(row["user_id"]),
-                display_name=str(row["display_name"]),
-                text=str(row["text"]),
-            )
-            result.append((int(row["id"]), msg))
-        return result
+            with self._get_session() as session:
+                stmt = (
+                    select(PendingMessageModel)
+                    .where(
+                        PendingMessageModel.group_id == group_id,
+                        PendingMessageModel.id > after_id,
+                    )
+                    .order_by(PendingMessageModel.id.asc())
+                    .limit(limit)
+                )
+                rows = session.execute(stmt).scalars().all()
+                result = []
+                for row in rows:
+                    ts = _parse_iso(row.timestamp) or _utc_now()
+                    msg = BufferedMessage(
+                        timestamp=ts,
+                        user_id=str(row.user_id),
+                        display_name=str(row.display_name),
+                        text=str(row.text),
+                        real_seq=str(row.real_seq),
+                    )
+                    result.append((int(row.id), msg))
+                return result
 
     def count_pending_messages_after(self, group_id: str, after_id: int) -> int:
         """Count pending messages after a given id."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) as cnt FROM pending_messages WHERE group_id=? AND id > ?;",
-                (group_id, after_id),
-            ).fetchone()
-        return int(row["cnt"]) if row else 0
+            with self._get_session() as session:
+                stmt = select(func.count(PendingMessageModel.id)).where(
+                    PendingMessageModel.group_id == group_id,
+                    PendingMessageModel.id > after_id,
+                )
+                return session.execute(stmt).scalar() or 0
+
+    def get_pending_messages_before(
+        self, group_id: str, before_id: int, limit: int
+    ) -> List[Tuple[int, "BufferedMessage"]]:
+        """Get pending messages before a given id (for reference context), returns list of (id, BufferedMessage)."""
+        with self._lock:
+            with self._get_session() as session:
+                stmt = (
+                    select(PendingMessageModel)
+                    .where(
+                        PendingMessageModel.group_id == group_id,
+                        PendingMessageModel.id <= before_id,
+                    )
+                    .order_by(PendingMessageModel.id.desc())
+                    .limit(limit)
+                )
+                rows = session.execute(stmt).scalars().all()
+                result = []
+                # Reverse to get chronological order
+                for row in reversed(rows):
+                    ts = _parse_iso(row.timestamp) or _utc_now()
+                    msg = BufferedMessage(
+                        timestamp=ts,
+                        user_id=str(row.user_id),
+                        display_name=str(row.display_name),
+                        text=str(row.text),
+                        real_seq=str(row.real_seq),
+                    )
+                    result.append((int(row.id), msg))
+                return result
 
     def get_flush_cursor(self, group_id: str) -> int:
         """Get the last flushed message id for a group, returns 0 if not set."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT last_flushed_id FROM group_flush_cursor WHERE group_id=?;",
-                (group_id,),
-            ).fetchone()
-        return int(row["last_flushed_id"]) if row else 0
+            with self._get_session() as session:
+                cursor = session.get(GroupFlushCursorModel, group_id)
+                return int(cursor.last_flushed_id) if cursor else 0
 
     def update_flush_cursor(self, group_id: str, last_flushed_id: int) -> None:
         """Update the flush cursor for a group."""
         now = _iso(_utc_now())
         with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO group_flush_cursor(group_id, last_flushed_id, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(group_id) DO UPDATE SET
-                  last_flushed_id=excluded.last_flushed_id,
-                  updated_at=excluded.updated_at;
-                """,
-                (group_id, last_flushed_id, now),
-            )
-            self._conn.commit()
+            with self._get_session() as session:
+                cursor = session.get(GroupFlushCursorModel, group_id)
+                if cursor:
+                    cursor.last_flushed_id = last_flushed_id
+                    cursor.updated_at = now
+                else:
+                    session.add(GroupFlushCursorModel(
+                        group_id=group_id,
+                        last_flushed_id=last_flushed_id,
+                        updated_at=now,
+                    ))
+                session.commit()
 
     def cleanup_old_pending_messages(self, group_id: str, up_to_id: int) -> int:
         """Delete pending messages up to and including the given id. Returns deleted count."""
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM pending_messages WHERE group_id=? AND id <= ?;",
-                (group_id, up_to_id),
-            )
-            self._conn.commit()
-            return cur.rowcount
+            with self._get_session() as session:
+                result = session.execute(
+                    sa_delete(PendingMessageModel).where(
+                        PendingMessageModel.group_id == group_id,
+                        PendingMessageModel.id <= up_to_id,
+                    )
+                )
+                session.commit()
+                return result.rowcount
 
     def get_groups_with_pending(self, min_pending: int) -> List[Tuple[str, int]]:
         """Get groups that have at least min_pending messages after their cursor."""
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT pm.group_id, COUNT(*) as cnt
-                FROM pending_messages pm
-                LEFT JOIN group_flush_cursor gfc ON pm.group_id = gfc.group_id
-                WHERE pm.id > COALESCE(gfc.last_flushed_id, 0)
-                GROUP BY pm.group_id
-                HAVING cnt >= ?;
-                """,
-                (min_pending,),
-            ).fetchall()
-        return [(str(row["group_id"]), int(row["cnt"])) for row in rows]
+            with self._get_session() as session:
+                # Subquery to get cursor for each group
+                cursor_subq = (
+                    select(
+                        GroupFlushCursorModel.group_id,
+                        GroupFlushCursorModel.last_flushed_id,
+                    )
+                    .subquery()
+                )
+
+                # Main query: count messages after cursor, grouped by group_id
+                stmt = (
+                    select(
+                        PendingMessageModel.group_id,
+                        func.count(PendingMessageModel.id).label("cnt"),
+                    )
+                    .outerjoin(
+                        cursor_subq,
+                        PendingMessageModel.group_id == cursor_subq.c.group_id,
+                    )
+                    .where(
+                        PendingMessageModel.id > func.coalesce(cursor_subq.c.last_flushed_id, 0)
+                    )
+                    .group_by(PendingMessageModel.group_id)
+                    .having(func.count(PendingMessageModel.id) >= min_pending)
+                )
+                rows = session.execute(stmt).all()
+                return [(str(row[0]), int(row[1])) for row in rows]
 
 
 class ChromaIndex:
@@ -621,6 +715,11 @@ class GroupMemoryManager:
         if not self._enabled:
             return
 
+        # Skip messages without real_seq (e.g., bot's own messages)
+        real_seq = str(message.real_seq).strip() if message.real_seq else ""
+        if not real_seq:
+            return
+
         bot_id = str(settings.get("bot_qq_id"))
         if self._ingest_mode == "bot":
             mentioned_bot = any(
@@ -661,6 +760,7 @@ class GroupMemoryManager:
             user_id=user_id_str,
             display_name=display_name,
             text=text,
+            real_seq=real_seq,
         )
         self._enqueue(group_id_str, buffered)
 
@@ -795,21 +895,19 @@ class GroupMemoryManager:
     def _enqueue(self, group_id: str, msg: BufferedMessage) -> None:
         state = self._get_state(group_id)
 
-        sig = msg.signature()
-        # Check for duplicate via database
-        if self._store.signature_exists(group_id, sig):
-            return
-
-        # Persist message to database
+        # Persist message to database (uses UNIQUE constraint on group_id, real_seq for dedup)
         try:
-            self._store.insert_pending_message(
+            row_id = self._store.insert_pending_message(
                 group_id=group_id,
+                real_seq=msg.real_seq,
                 timestamp=msg.timestamp,
                 user_id=msg.user_id,
                 display_name=msg.display_name,
                 text=msg.text,
-                signature=sig,
             )
+            if row_id is None:
+                # Duplicate real_seq, skip
+                return
         except Exception:
             logger.exception("agentic_memory: failed to persist pending message")
             return
@@ -827,27 +925,36 @@ class GroupMemoryManager:
             lock = asyncio.Lock()
             self._group_locks[group_id] = lock
         async with lock:
-            state = self._states.get(group_id)
-            if state is None:
-                return
-            while len(state.pending_messages) >= self._flush_every:
-                ref = list(state.ref_messages)[-self._ref_count:]
-                update = list(state.pending_messages)[: self._flush_every]
-                if not update:
-                    return
+            while True:
+                cursor = self._store.get_flush_cursor(group_id)
+                pending_count = self._store.count_pending_messages_after(group_id, cursor)
+                if pending_count < self._flush_every:
+                    break
+
+                # Get reference messages (messages before cursor, for context only)
+                # We read from (cursor - ref_count) to cursor
+                ref_rows = self._store.get_pending_messages_before(group_id, cursor, self._ref_count)
+                ref_msgs = [msg for _, msg in ref_rows]
+
+                # Get update messages (messages to process)
+                update_rows = self._store.get_pending_messages_after(group_id, cursor, self._flush_every)
+                if not update_rows:
+                    break
+
+                update_msgs = [msg for _, msg in update_rows]
+                last_id = update_rows[-1][0]  # id of the last message in this batch
+
                 try:
-                    await self._run_one_flush(group_id, ref, update)
+                    await self._run_one_flush(group_id, ref_msgs, update_msgs)
+                    # Update cursor to mark these messages as processed
+                    self._store.update_flush_cursor(group_id, last_id)
+                    # Optionally cleanup old messages (keep some for reference)
+                    cleanup_before = last_id - self._ref_count * 2
+                    if cleanup_before > 0:
+                        self._store.cleanup_old_pending_messages(group_id, cleanup_before)
                 except Exception:
                     logger.exception("agentic_memory: flush failed (group_id=%s)", group_id)
-                    return
-                for _ in range(self._flush_every):
-                    if state.pending_messages:
-                        state.pending_messages.popleft()
-                    else:
-                        break
-                window = ref + update
-                state.ref_messages.clear()
-                state.ref_messages.extend(window[-self._ref_count :])
+                    break
 
     async def _run_one_flush(
         self, group_id: str, ref_msgs: Sequence[BufferedMessage], update_msgs: Sequence[BufferedMessage]

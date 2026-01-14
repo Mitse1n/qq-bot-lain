@@ -126,6 +126,7 @@ class Message:
     timestamp: datetime
     user_id: str
     nickname: str
+    real_seq: str  # Unique, auto-incrementing sequence number within a group
     card: str = ""
     content: List[MessageSegment] = field(default_factory=list)
 

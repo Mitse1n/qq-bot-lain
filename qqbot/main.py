@@ -125,6 +125,7 @@ class ChatBot:
         sender = msg_data.get("sender", {})
         user_id = sender.get("user_id")
         timestamp = msg_data.get("time")
+        real_seq = str(msg_data.get("real_seq", ""))
 
         # Process images using ImageService
         message_content_raw = await self.image_service.process_message_images(msg_data, enable_vision)
@@ -137,8 +138,9 @@ class ChatBot:
         return Message(
             timestamp=datetime.fromtimestamp(timestamp, tz=timezone(timedelta(hours=8))),
             user_id=str(user_id),
-            card=str(sender.get("card")),
             nickname=sender.get("nickname"),
+            real_seq=real_seq,
+            card=str(sender.get("card")),
             content=parsed_content,
         )
 
@@ -289,6 +291,7 @@ class ChatBot:
                                 timestamp=datetime.now(timezone(timedelta(hours=8))),
                                 user_id=str(settings.get("bot_qq_id")),
                                 nickname=settings.get("bot_name"),
+                                real_seq="",  # Bot messages don't have real_seq
                                 content=content_segments,
                             )
                         )
@@ -312,6 +315,7 @@ class ChatBot:
                         timestamp=datetime.now(timezone(timedelta(hours=8))),
                         user_id=str(settings.get("bot_qq_id")),
                         nickname=settings.get("bot_name"),
+                        real_seq="",  # Bot messages don't have real_seq
                         content=content_segments,
                     )
                 )
@@ -331,6 +335,7 @@ class ChatBot:
                     timestamp=datetime.now(timezone(timedelta(hours=8))),
                     user_id=settings.get('bot_qq_id'),
                     nickname=settings.get('bot_name'),
+                    real_seq="",  # Bot messages don't have real_seq
                     content=[TextMessageSegment(type="text", data=TextData(text=error_message))],
                 ))
             print(f"Error handling request: {e}")

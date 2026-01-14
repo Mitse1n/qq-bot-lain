@@ -20,6 +20,7 @@ dependencies = [
     "Pillow",
     "dynaconf>=3.2.11",
     "chromadb>=1.4.0",
+    "sqlalchemy>=2.0.0",
 ]
 
 [project.optional-dependencies]

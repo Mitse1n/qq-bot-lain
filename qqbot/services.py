@@ -561,7 +561,6 @@ class GeminiService:
         config = types.EmbedContentConfig(
             output_dimensionality=output_dimensionality,
             task_type=task_type,
-            auto_truncate=True,
         )
 
         max_retries = 2
