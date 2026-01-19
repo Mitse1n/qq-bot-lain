@@ -457,9 +457,7 @@ class GeminiService:
         recent_messages = list(messages)[-self.max_messages_history:]
         
         content_parts = self._build_chat_parts(recent_messages, memory_prompt=memory_prompt)
-        grounding_tool = types.Tool(
-            google_search=types.GoogleSearch()
-        )
+        grounding_tool = web_search(self.client, "gemini-3-flash-preview")
 
         max_retries = 3
         retry_delay = 2
@@ -471,7 +469,10 @@ class GeminiService:
                 stream = self.client.aio.models.generate_content_stream(
                     model=self.model_name, 
                     contents=content_parts,                    
-                    config=types.GenerateContentConfig(tools=[grounding_tool],
+                    config=types.GenerateContentConfig(tools=[
+                        web_search(self.client, "gemini-3-flash-preview"),
+                        get_user_msg_history(recent_messages[:-settings.get('img_context_length')])
+                        ],
                                                        thinking_config=types.ThinkingConfig(thinking_level="low")),
                     
                 )
@@ -679,25 +680,99 @@ class EventService:
             print(f"Error connecting to event stream: {e}")
 
 
-def add_citations(response: types.GenerateContentResponse):
-    text = response.text
-    supports = response.candidates[0].grounding_metadata.grounding_supports
-    chunks = response.candidates[0].grounding_metadata.grounding_chunks
+def web_search(client, model_name):
+    grounding_tool = types.Tool(
+        google_search=types.GoogleSearch()
+    )
 
-    # Sort supports by end_index in descending order to avoid shifting issues when inserting.
-    sorted_supports = sorted(supports, key=lambda s: s.segment.end_index, reverse=True)
+    def generate_content(query: list[str]) -> str:
+        """Search the internet using Google Search to retrieve real-time information, 
+        latest news, or specific facts. Call this tool when you need to answer 
+        questions about current events, get up-to-date data, or verify information.
 
-    for support in sorted_supports:
-        end_index = support.segment.end_index
-        if support.grounding_chunk_indices:
-            # Create citation string like [1](link1)[2](link2)
-            citation_links = []
-            for i in support.grounding_chunk_indices:
-                if i < len(chunks):
-                    uri = chunks[i].web.uri
-                    citation_links.append(f"[{i + 1}]({uri})")
+        Args:
+            query (list[str]): A list of search keywords or query phrases.
+        """
+        try:
+            # 使用 f-string 处理字符串拼接
+            prompt = f"Please perform a web search for the following topics and provide a detailed and accurate answer based on the search results: {', '.join(query)}"
+            
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(tools=[grounding_tool])
+            )
+            return response.text if response else ""
+        except Exception as e:
+            logger.error(f"Web search error: {e}")
+            return f"Search failed: {str(e)}"
 
-            citation_string = ", ".join(citation_links)
-            text = text[:end_index] + "\n[参考]"+ citation_string + text[end_index:]
+    return generate_content
 
-    return text
+def get_user_msg_history(history: list[Message]):
+    def get_user_msg_history(user_id: list[int]) -> str:
+        """获取可能和输入的 user_id 有关的更早的聊天记录.
+
+        Args:
+            user_id (list[int]): 用户 ID 列表.
+        """
+        # 1. 过滤掉不含文本内容的消息
+        filtered_history = []
+        for msg in history:
+            has_text = any(
+                getattr(seg, "type", None) == "text" for seg in msg.content
+            )
+            if has_text:
+                filtered_history.append(msg)
+        
+        # 2. 找到匹配 user_id 的消息索引，并包含其前 5 条
+        selected_indices = set()
+        user_id_strs = [str(uid) for uid in user_id]
+        
+        for i, msg in enumerate(filtered_history):
+            if msg.user_id in user_id_strs:
+                # 包含当前消息及前 5 条
+                for j in range(max(0, i - 5), i + 1):
+                    selected_indices.add(j)
+        
+        # 3. 按顺序排列并取最后的 400 个
+        sorted_indices = sorted(list(selected_indices))
+        final_indices = sorted_indices[-400:]
+        
+        # 4. 拼接结果
+        result_parts = []
+        for idx in final_indices:
+            msg = filtered_history[idx]
+            # 获取文本内容（不含图片占位符）
+            text, _ = msg.get_formatted_text(vision_enabled=False)
+            if text.strip(): # 再次确保不是空的，过滤掉不支持的纯表情/文件等消息
+                result_parts.append(f"{msg.user_id}: {text}\n")
+            
+        return "".join(result_parts)
+    return get_user_msg_history
+
+
+def get_previous_messages(history: list[Message]):
+    def previous_messages() -> str:
+        """获取更早的群聊记录(只包含文本消息).
+        """
+        # 1. 过滤掉不含文本内容的消息
+        filtered_history = []
+        for msg in history:
+            has_text = any(
+                getattr(seg, "type", None) == "text" for seg in msg.content
+            )
+            if has_text:
+                filtered_history.append(msg)
+        
+        
+        # 4. 拼接结果
+        result_parts = []
+        for msg in filtered_history:
+            # 获取文本内容（不含图片占位符）
+            text, _ = msg.get_formatted_text(vision_enabled=False)
+            if text.strip(): # 再次确保不是空的，过滤掉不支持的纯表情/文件等消息
+                result_parts.append(f"{msg.user_id}: {text}\n")
+            
+        return "".join(result_parts)
+    return previous_messages

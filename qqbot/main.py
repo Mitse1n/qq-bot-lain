@@ -227,7 +227,7 @@ class ChatBot:
         message_queue = self.message_queues[group_id]
         if len(message_queue) < 50 and not group_state["has_history"]:
             history_response = await self.chat_service.get_group_msg_history(
-                group_id, count=int(settings.get('max_messages_history') * 1.5)
+                group_id, count=5000
             )
             if history_response and history_response.data:
                 history_messages = []
