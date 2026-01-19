@@ -257,9 +257,25 @@ class ChatBot:
         try:
             memory_prompt = None
             try:
-                memory_prompt = await self.group_memory.build_memory_prompt(
-                    group_id, history, mention_user_id=str(mention_id)
-                )
+                prompt_timeout_raw = settings.get("agentic_memory.prompt_timeout_seconds", 2.5)
+                try:
+                    prompt_timeout_s = float(prompt_timeout_raw)
+                except Exception:
+                    prompt_timeout_s = 2.5
+
+                if prompt_timeout_s > 0:
+                    memory_prompt = await asyncio.wait_for(
+                        self.group_memory.build_memory_prompt(
+                            group_id, history, mention_user_id=str(mention_id)
+                        ),
+                        timeout=prompt_timeout_s,
+                    )
+                else:
+                    memory_prompt = await self.group_memory.build_memory_prompt(
+                        group_id, history, mention_user_id=str(mention_id)
+                    )
+            except asyncio.TimeoutError:
+                print(f"agentic_memory retrieval timeout for group {group_id}")
             except Exception as e:
                 print(f"agentic_memory retrieval error for group {group_id}: {e}")
 

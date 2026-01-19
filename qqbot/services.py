@@ -8,7 +8,6 @@ from typing import Any, List, Deque, Optional, Sequence, Union
 import os
 import random
 import string
-import time
 from io import BytesIO
 from PIL import Image
 from qqbot.config_loader import (
@@ -18,6 +17,9 @@ from qqbot.models import Message, GroupMessageHistoryResponse, Sender
 import asyncio
 import re
 import glob
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def retry_http_request(url: str, payload: dict, max_retry_count: int = 2, timeout: float = 10, client: Optional[httpx.AsyncClient] = None,method: str = "POST"):
@@ -251,9 +253,9 @@ class GeminiService:
             return self.image_service.image_dir
         return "../data/img"  # fallback to default path
 
-    def _rotate_api_key(self):
+    async def _rotate_api_key(self) -> str:
         """Rotate to the next API key in the list"""
-        time.sleep(random.uniform(1, 2))
+        await asyncio.sleep(random.uniform(1, 2))
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         new_api_key = str(self.api_keys[self.current_key_index])  # Ensure API key is a string
         self.client = genai.Client(api_key=new_api_key)
@@ -481,7 +483,7 @@ class GeminiService:
                 # Handle 429 (rate limit) errors with key rotation
                 if "429" in str(e) and keys_tried < max_key_rotations:
                     print(f"Rate limit exceeded (429). Rotating API key...")
-                    self._rotate_api_key()
+                    await self._rotate_api_key()
                     keys_tried += 1
                     if attempt >= max_retries:
                         raise e
@@ -533,11 +535,15 @@ class GeminiService:
                     contents=prompt,
                     config=config,
                 )
-                print("structed request: ", prompt, "response: ", resp.text)
+                logger.debug(
+                    "structured request: prompt_len=%d response_len=%d",
+                    len(prompt) if prompt else 0,
+                    len(resp.text) if getattr(resp, "text", None) else 0,
+                )
                 return resp.text
             except Exception as e:
                 if "429" in str(e) and keys_tried < max_key_rotations:
-                    self._rotate_api_key()
+                    await self._rotate_api_key()
                     keys_tried += 1
                     continue
                 if "503" in str(e) and attempt < max_retries:
@@ -583,7 +589,7 @@ class GeminiService:
                 return vectors
             except Exception as e:
                 if "429" in str(e) and keys_tried < max_key_rotations:
-                    self._rotate_api_key()
+                    await self._rotate_api_key()
                     keys_tried += 1
                     continue
                 if "503" in str(e) and attempt < max_retries:
