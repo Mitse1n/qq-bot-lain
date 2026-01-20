@@ -634,7 +634,7 @@ class ChromaIndex:
 
     def query(self, group_id: str, *, embedding: Sequence[float], k: int) -> Dict:
         col = self._collection(group_id)
-        return col.query(query_embeddings=[list(embedding)], n_results=int(k), include=["metadatas", "distances", "documents", "ids"])
+        return col.query(query_embeddings=[list(embedding)], n_results=int(k), include=["metadatas", "distances", "documents"])
 
 
 class GroupMemoryManager:
