@@ -83,7 +83,7 @@ class ChatBot:
         self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
         self.group_memory = GroupMemoryManager(self.gemini_service)
-        self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
+        self.message_queues = defaultdict(lambda: deque[Message](maxlen=settings.get('max_messages_history')))
         self.group_states = defaultdict(lambda: {"has_history": False})
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
         self.active_group_tasks = set()  # Per-group concurrency control
@@ -230,12 +230,12 @@ class ChatBot:
                 group_id, count=5000
             )
             if history_response and history_response.data:
-                history_messages = []
+                history_messages: List[Message] = []
                 for msg in history_response.data.messages[:-settings.get('img_context_length')]:
                     if not (msg.sender and msg.message):
                         continue
 
-                    processed_msg = await self._process_message(msg.model_dump(),False)
+                    processed_msg: Message = await self._process_message(msg.model_dump(),False)
 
                     if self._should_process_message(processed_msg):
                         history_messages.append(processed_msg)
@@ -246,7 +246,7 @@ class ChatBot:
                     if self._should_process_message(processed_msg):
                         history_messages.append(processed_msg)
 
-                new_queue = deque(maxlen=settings.get('max_messages_history'))
+                new_queue = deque[Message](maxlen=5000)
                 new_queue.extend(history_messages)
                 self.message_queues[group_id] = new_queue
                 group_state["has_history"] = True
