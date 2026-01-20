@@ -13,7 +13,7 @@ deploy:
 	@echo "版本: $(VERSION)"
 	@echo "1. 构建新镜像..."
 	docker build -t $(LATEST_TAG) -t $(VERSION_TAG) .
-	@echo "2. 检查并准备配置文件..."
+	@echo "2. 检查并准备配置文件和数据目录..."
 	@if [ ! -f config.yaml ]; then \
 		echo "本地未找到 config.yaml，从镜像中复制默认配置..."; \
 		docker run --rm -v $(shell pwd):/host $(LATEST_TAG) cp /app/config.yaml /host/config.yaml; \
@@ -21,16 +21,28 @@ deploy:
 	else \
 		echo "使用现有的 config.yaml 配置文件"; \
 	fi
+	@if [ ! -d data ]; then \
+		echo "本地未找到 data 目录，创建中..."; \
+		mkdir -p data; \
+		echo "已创建 data 目录"; \
+	else \
+		echo "使用现有的 data 目录"; \
+	fi
 	@echo "3. 停止并删除旧容器..."
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
 	@echo "4. 运行新容器..."
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host $(LATEST_TAG)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" \
+		-v $(shell pwd)/config.yaml:/app/config.yaml:ro \
+		-v $(shell pwd)/data:/app/data \
+		$(LATEST_TAG)
 	@echo "5. 清理旧镜像（保留最近3个版本）..."
 	@docker images $(IMAGE_NAME) --format "{{.Tag}}" | grep -v latest | tail -n +4 | xargs -I {} docker rmi $(IMAGE_NAME):{} 2>/dev/null || true
 	@echo "清理完成，保留最近3个版本"
 	@echo "部署完成！"
 	@echo "当前版本: $(VERSION)"
+	@echo "配置文件: $(shell pwd)/config.yaml (只读挂载)"
+	@echo "数据目录: $(shell pwd)/data (读写挂载)"
 	@echo "使用 'make logs' 查看运行日志"
 	@echo "使用 'make stop' 停止容器"
 	@echo "使用 'make list-versions' 查看所有版本"
@@ -67,7 +79,7 @@ rollback-to:
 		exit 1; \
 	fi
 	@echo "回滚到版本: $(VERSION)"
-	@echo "检查并准备配置文件..."
+	@echo "检查并准备配置文件和数据目录..."
 	@if [ ! -f config.yaml ]; then \
 		echo "本地未找到 config.yaml，从镜像中复制默认配置..."; \
 		docker run --rm -v $(shell pwd):/host $(IMAGE_NAME):$(VERSION) cp /app/config.yaml /host/config.yaml; \
@@ -75,9 +87,19 @@ rollback-to:
 	else \
 		echo "使用现有的 config.yaml 配置文件"; \
 	fi
+	@if [ ! -d data ]; then \
+		echo "本地未找到 data 目录，创建中..."; \
+		mkdir -p data; \
+		echo "已创建 data 目录"; \
+	else \
+		echo "使用现有的 data 目录"; \
+	fi
 	-docker stop $(CONTAINER_NAME) 2>/dev/null || true
 	-docker rm $(CONTAINER_NAME) 2>/dev/null || true
-	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" -v $(shell pwd):/app/host $(IMAGE_NAME):$(VERSION)
+	docker run -d --name $(CONTAINER_NAME) --restart unless-stopped --network="host" \
+		-v $(shell pwd)/config.yaml:/app/config.yaml:ro \
+		-v $(shell pwd)/data:/app/data \
+		$(IMAGE_NAME):$(VERSION)
 	@echo "回滚完成！"
 
 # 清理旧版本镜像（保留最近3个版本）
