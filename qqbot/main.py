@@ -365,9 +365,8 @@ def convert_md_2_pure_text(md: str) -> str:
     return text.strip()
 def delete_qq_prefix(text: str) -> str:
     return re.sub(r'^@\d+', '', text)
+def delete_formatted_prefix(text: str) -> str:
+    return re.sub(r'^\(\d{2}:\d{2}\)\s\d+:', '', text)
 if __name__ == "__main__":
     print("Lain Bot is staring...")
     asyncio.run(main())
-
-def delete_formatted_prefix(text: str) -> str:
-    return re.sub(r'^\(\d{2}:\d{2}\)\s\d+:', '', text)
