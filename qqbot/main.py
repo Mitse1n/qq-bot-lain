@@ -254,6 +254,8 @@ class ChatBot:
                     )
                     
                     for part in ready_parts:
+                        part = delete_formatted_prefix(part)
+                        part = delete_qq_prefix(part)
                         part = delete_qq_prefix(part)
                         part = convert_md_2_pure_text(part)
                         text_to_parse = " " + part if first_chunk else part
@@ -367,3 +369,5 @@ if __name__ == "__main__":
     print("Lain Bot is staring...")
     asyncio.run(main())
 
+def delete_formatted_prefix(text: str) -> str:
+    return re.sub(r'^\(\d{2}:\d{2}\)\s\d+:', '', text)
