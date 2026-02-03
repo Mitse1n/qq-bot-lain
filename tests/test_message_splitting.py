@@ -1,5 +1,5 @@
 import pytest
-from qqbot.main import split_message_stream
+from qqbot.streaming import split_message_stream
 
 
 class TestSplitMessageStream:

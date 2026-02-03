@@ -5,8 +5,6 @@ import time
 
 from pydantic import BaseModel, Field, field_validator
 
-from qqbot.config_loader import settings
-
 
 class Sender(BaseModel):
     user_id: int
@@ -124,14 +122,15 @@ MessageSegment = Annotated[
 @dataclass
 class Message:
     timestamp: datetime
-    real_seq: int
     user_id: str
-    sender_nickname: Optional[str] = None
     nickname: str
+    real_seq: Optional[int] = None
     card: Optional[str] = None
     content: List[MessageSegment] = field(default_factory=list)
 
-    def get_formatted_text(self,vision_enabled: bool, image_count_start: int = 0) -> tuple[str, int]:
+    def get_formatted_text(
+        self, vision_enabled: bool, image_count_start: int = 0
+    ) -> tuple[str, int]:
         """
         Formats the message content into a string representation.
         e.g., "[1] a picture [2] another picture @user"
@@ -155,13 +154,11 @@ class Message:
         Returns a list of image filenames from the message content.
         These should be the locally saved file names.
         """
-        if not settings.get("enable_vision"):
-            return []
-        images = []
-        for segment in self.content:
-            if isinstance(segment, ImageMessageSegment):
-                images.append(segment.data.file)
-        return images
+        return [
+            segment.data.file
+            for segment in self.content
+            if isinstance(segment, ImageMessageSegment)
+        ]
 
 
 class GroupHistoryMessageEvent(BaseModel):
@@ -312,5 +309,4 @@ class TokenBucket:
             # Full refill if time window has passed
             self.tokens = self.max_tokens
             self.last_refill = now
-
 
