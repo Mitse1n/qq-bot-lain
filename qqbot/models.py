@@ -124,9 +124,11 @@ MessageSegment = Annotated[
 @dataclass
 class Message:
     timestamp: datetime
+    real_seq: int
     user_id: str
+    sender_nickname: Optional[str] = None
     nickname: str
-    card: str = ""
+    card: Optional[str] = None
     content: List[MessageSegment] = field(default_factory=list)
 
     def get_formatted_text(self,vision_enabled: bool, image_count_start: int = 0) -> tuple[str, int]:

@@ -19,6 +19,7 @@ dependencies = [
     "aiohttp",
     "Pillow",
     "dynaconf>=3.2.11",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]

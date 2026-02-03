@@ -3,9 +3,9 @@ import httpx
 import aiohttp
 import re
 from pydantic import ValidationError, TypeAdapter
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Set
 
 from qqbot.config_loader import settings
 from qqbot.models import (
@@ -18,6 +18,7 @@ from qqbot.models import (
     TokenBucket,
 )
 from qqbot.services import EventService, GeminiService, ChatService, ImageService
+from qqbot.database import GroupDatabase
 
 
 def split_message_stream(current_buffer: str, new_chunk: str, min_length: int = 400) -> tuple[list[str], str]:
@@ -81,14 +82,18 @@ class ChatBot:
         self.event_service = EventService()
         self.gemini_service = GeminiService(self.image_service)
         self.chat_service = ChatService(self.http_client)
-        self.message_queues = defaultdict(lambda: deque(maxlen=settings.get('max_messages_history')))
-        self.group_states = defaultdict(lambda: {"has_history": False})
+        # Database-backed message storage
+        self.pulled_groups: Set[int] = set()  # Groups that have had history pulled this session
         self.semaphore = asyncio.Semaphore(10)  # Global concurrency limit
-        self.active_group_tasks = set()  # Per-group concurrency control
+        self.active_group_tasks: Set[int] = set()  # Per-group concurrency control
         self.rate_limiters = defaultdict(lambda: TokenBucket(
             max_tokens=settings.get('rate_limit.max_messages_per_hour', 3),
             time_window=settings.get('rate_limit.time_window_seconds', 3600)
         ))
+    
+    def _get_group_db(self, group_id: int) -> GroupDatabase:
+        """Get the database instance for a group."""
+        return GroupDatabase.get_instance(group_id, data_dir="./data")
 
     async def run(self):
         print("Lain Bot is running...")
@@ -123,6 +128,7 @@ class ChatBot:
         sender = msg_data.get("sender", {})
         user_id = sender.get("user_id")
         timestamp = msg_data.get("time")
+        real_seq = int(msg_data.get("real_seq"))
 
         # Process images using ImageService
         message_content_raw = await self.image_service.process_message_images(msg_data, enable_vision)
@@ -137,6 +143,7 @@ class ChatBot:
             user_id=str(user_id),
             card=str(sender.get("card")),
             nickname=sender.get("nickname"),
+            real_seq=real_seq,
             content=parsed_content,
         )
 
@@ -144,17 +151,25 @@ class ChatBot:
         if event.post_type != "message" or event.message_type != "group":
             return
 
+        group_id = event.group_id
+        
+        # Check if we need to pull history for this group (first message from this group this session)
+        if group_id not in self.pulled_groups:
+            await self._pull_and_store_history(group_id)
+            self.pulled_groups.add(group_id)
+
         message = await self._process_message(event.model_dump(), enable_vision=settings.get('enable_vision'))
         
         if not self._should_process_message(message):
             return
 
-        self.message_queues[event.group_id].append(message)
+        # Store message to database
+        db = self._get_group_db(group_id)
+        db.insert_message(message)
 
         if not self._is_bot_mentioned(event.message):
             return
 
-        group_id = event.group_id
         if group_id in self.active_group_tasks:
             print(f"Task for group {group_id} already in progress. Ignoring.")
             return
@@ -171,14 +186,52 @@ class ChatBot:
         self.active_group_tasks.add(group_id)
         try:
             async with self.semaphore:
-                await self.handle_chat_request(group_id, event.message_id,event.user_id)
+                await self.handle_chat_request(group_id, event.message_id, event.user_id)
         except Exception as e:
             print(f"Error handling event for group {group_id}: {e}")
         finally:
             self.active_group_tasks.remove(group_id)
 
-    def _parse_message_content(self, text: str, group_id: int) -> List[dict]:
-        history = self.message_queues[group_id]
+    async def _pull_and_store_history(self, group_id: int):
+        """Pull historical messages for a group and store them in the database."""
+        db = self._get_group_db(group_id)
+        max_seq = db.get_max_real_seq()
+        
+        print(f"Pulling history for group {group_id}, max_seq in db: {max_seq}")
+        
+        history_response = await self.chat_service.get_group_msg_history(
+            group_id, count=int(settings.get('max_messages_history') * 1.5)
+        )
+        
+        if not history_response or not history_response.data:
+            print(f"No history data received for group {group_id}")
+            return
+        
+        history_messages = []
+        for msg in history_response.data.messages:
+            if not (msg.sender and msg.message):
+                continue
+            
+            # Skip messages we already have based on real_seq
+            msg_real_seq = int(msg.real_seq) if msg.real_seq else None
+            if max_seq is not None and msg_real_seq is not None and msg_real_seq <= max_seq:
+                continue
+            
+            # Process without vision for historical messages (except recent ones)
+            enable_vision_for_msg = False
+            processed_msg = await self._process_message(msg.model_dump(), enable_vision_for_msg)
+            
+            if self._should_process_message(processed_msg):
+                history_messages.append(processed_msg)
+        
+        if history_messages:
+            inserted = db.insert_messages_bulk(history_messages)
+            print(f"Inserted {inserted} historical messages for group {group_id}")
+        else:
+            print(f"No new historical messages to insert for group {group_id}")
+
+    def _parse_message_content(self, text: str, history: List[Message]) -> List[dict]:
+        """Parse text to convert @mentions to at segments."""
         known_users = set()
         for msg in history:
             known_users.add(str(msg.user_id))
@@ -214,36 +267,12 @@ class ChatBot:
              
         return segments
 
-    async def handle_chat_request(self, group_id: int, reply_id: int, mention_id:int):
-        group_state = self.group_states[group_id]
-        message_queue = self.message_queues[group_id]
-        if len(message_queue) < 50 and not group_state["has_history"]:
-            history_response = await self.chat_service.get_group_msg_history(
-                group_id, count=int(settings.get('max_messages_history') * 1.5)
-            )
-            if history_response and history_response.data:
-                history_messages = []
-                for msg in history_response.data.messages[:-settings.get('img_context_length')]:
-                    if not (msg.sender and msg.message):
-                        continue
-
-                    processed_msg = await self._process_message(msg.model_dump(),False)
-
-                    if self._should_process_message(processed_msg):
-                        history_messages.append(processed_msg)
-                for msg in history_response.data.messages[-settings.get('img_context_length'):]:
-                    if not (msg.sender and msg.message):
-                        continue
-                    processed_msg = await self._process_message(msg.model_dump(),settings.get('enable_vision'))
-                    if self._should_process_message(processed_msg):
-                        history_messages.append(processed_msg)
-
-                new_queue = deque(maxlen=settings.get('max_messages_history'))
-                new_queue.extend(history_messages)
-                self.message_queues[group_id] = new_queue
-                group_state["has_history"] = True
-
-        history = self.message_queues[group_id]
+    async def handle_chat_request(self, group_id: int, reply_id: int, mention_id: int):
+        db = self._get_group_db(group_id)
+        
+        # Read recent messages from database
+        history = db.get_recent_messages(limit=settings.get('max_messages_history'))
+        
         response_buffer = ""
         first_chunk = True
         try:
@@ -259,7 +288,7 @@ class ChatBot:
                         part = delete_qq_prefix(part)
                         part = convert_md_2_pure_text(part)
                         text_to_parse = " " + part if first_chunk else part
-                        parsed_segments = self._parse_message_content(text_to_parse, group_id)
+                        parsed_segments = self._parse_message_content(text_to_parse, history)
                         
                         if first_chunk:
                             await self.chat_service.send_group_message(
@@ -271,22 +300,15 @@ class ChatBot:
                                 group_id, parsed_segments
                             )
                         
-                        content_segments = TypeAdapter(List[MessageSegment]).validate_python(parsed_segments)
-                        self.message_queues[group_id].append(
-                            Message(
-                                timestamp=datetime.now(timezone(timedelta(hours=8))),
-                                user_id=str(settings.get("bot_qq_id")),
-                                nickname=settings.get("bot_name"),
-                                content=content_segments,
-                            )
-                        )
+                        # Note: Bot responses don't have real_seq, so they won't be persisted
+                        # This is by design - bot responses come through SSE and will be stored then
 
             if response_buffer:  # 发送剩余的消息
                 # 在解析成消息段之前处理原始文本
                 response_buffer = delete_qq_prefix(response_buffer)
                 response_buffer = convert_md_2_pure_text(response_buffer)
                 response_buffer = " " + response_buffer if first_chunk else response_buffer
-                parsed_segments = self._parse_message_content(response_buffer, group_id)
+                parsed_segments = self._parse_message_content(response_buffer, history)
                 if first_chunk:
                     await self.chat_service.send_group_message(
                         group_id, parsed_segments, reply_id, mention_id
@@ -295,17 +317,6 @@ class ChatBot:
                     await self.chat_service.send_group_message(
                         group_id, parsed_segments
                     )
-                
-                content_segments = TypeAdapter(List[MessageSegment]).validate_python(parsed_segments)
-                self.message_queues[group_id].append(
-                    Message(
-                        timestamp=datetime.now(timezone(timedelta(hours=8))),
-                        user_id=str(settings.get("bot_qq_id")),
-                        nickname=settings.get("bot_name"),
-                        content=content_segments,
-                    )
-                )
-
 
         except Exception as e:
             if "503" in str(e):
@@ -316,13 +327,6 @@ class ChatBot:
                 error_message = " 哎呀，出现奇怪的错误了"
             print(f"Error generating content: {e}")
             await self.chat_service.send_group_message(group_id, error_message, reply_id, mention_id)
-            self.message_queues[group_id].append(
-                Message(
-                    timestamp=datetime.now(timezone(timedelta(hours=8))),
-                    user_id=settings.get('bot_qq_id'),
-                    nickname=settings.get('bot_name'),
-                    content=[TextMessageSegment(type="text", data=TextData(text=error_message))],
-                ))
             print(f"Error handling request: {e}")
 
     async def close(self):
